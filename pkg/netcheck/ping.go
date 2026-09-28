@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
-	"strings"
 	"time"
 
 	probing "github.com/prometheus-community/pro-bing"
@@ -189,12 +188,12 @@ func (p Pinger) tcpTimeout() time.Duration {
 	return 2 * time.Second
 }
 
+// isConnectionRefused reports whether a dial was answered with a reset: the
+// host is up and nothing listens on the port. Windows reports it as its own
+// Winsock error rather than ECONNREFUSED, and in its own words, so neither the
+// Unix errno nor the message text finds it there (errConnRefused).
 func isConnectionRefused(err error) bool {
-	var se *net.OpError
-	if !errors.As(err, &se) {
-		return false
-	}
-	return strings.Contains(strings.ToLower(se.Err.Error()), "connection refused")
+	return errors.Is(err, errConnRefused)
 }
 
 // resolveHost turns a name into an address, distinguishing a name that does not

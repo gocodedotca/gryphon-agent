@@ -12,7 +12,6 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/gocodedotca/gryphon-agent/pkg/agent"
@@ -354,7 +353,7 @@ func TCPOutcome(ctx context.Context, t TCPTarget, rtt time.Duration, err error) 
 			return unknown("%s - name server did not answer: %v", addr, err)
 		}
 	}
-	if errors.Is(err, syscall.ECONNREFUSED) {
+	if isConnectionRefused(err) {
 		return problem("%s - connection refused", addr)
 	}
 	var netErr net.Error
