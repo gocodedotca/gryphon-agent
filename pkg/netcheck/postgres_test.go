@@ -27,6 +27,12 @@ type pgReply struct {
 // startStubPostgres listens on the loopback. It answers SSLRequest with
 // sslAnswer ('N' or 'S'; 'S' is not followed by a TLS handshake here, the
 // tests for it use a real server) and every startup message with reply.
+// stubReplyDelay holds back each stub server's first answer. Go's clock on
+// Windows moves in ticks of up to 15.6ms, so a loopback handshake answered at
+// once can finish inside one tick and measure a round trip of zero -- which
+// the tests below rightly treat as not measured.
+const stubReplyDelay = 20 * time.Millisecond
+
 func startStubPostgres(t *testing.T, sslAnswer byte, reply pgReply) string {
 	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")
@@ -49,6 +55,7 @@ func startStubPostgres(t *testing.T, sslAnswer byte, reply pgReply) string {
 
 func serveStubPostgres(conn net.Conn, sslAnswer byte, reply pgReply) {
 	defer func() { _ = conn.Close() }()
+	time.Sleep(stubReplyDelay)
 	for {
 		var lenBuf [4]byte
 		if _, err := io.ReadFull(conn, lenBuf[:]); err != nil {

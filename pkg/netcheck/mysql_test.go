@@ -85,6 +85,7 @@ func startStubMySQL(t *testing.T, st mysqlStub) string {
 			}
 			go func() {
 				defer func() { _ = conn.Close() }()
+				time.Sleep(stubReplyDelay)
 				if st.greetErr != nil {
 					_ = writeMySQLPacket(conn, 0, st.greetErr.packet())
 					return
