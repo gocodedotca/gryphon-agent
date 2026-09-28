@@ -18,15 +18,16 @@ tasks:
         - go test ./...
 
     build-client:
-      desc: 'Build the headless agent at tmp/gowatcher-client (linux/amd64; override: task build-client OS=darwin ARCH=arm64)'
+      desc: 'Build the headless agent at tmp/gowatcher-client (linux/amd64; override: task build-client OS=darwin ARCH=arm64, or OS=windows)'
       vars:
         OS: '{{.OS | default "linux"}}'
         ARCH: '{{.ARCH | default "amd64"}}'
+        EXT: '{{if eq .OS "windows"}}.exe{{end}}'
       cmds:
         - mkdir -p tmp
         - >-
           CGO_ENABLED=0 GOOS={{.OS}} GOARCH={{.ARCH}}
-          go build -trimpath -ldflags="-s -w" -o tmp/gowatcher-client ./cmd/client
+          go build -trimpath -ldflags="-s -w" -o tmp/gowatcher-client{{.EXT}} ./cmd/client
 
     build-client-mac:
       desc: 'Build the menu bar agent, "tmp/Gryphon Agent.app", universal and ad-hoc signed for local testing'

@@ -72,7 +72,7 @@ func ValidateScriptsDir(dir string) error {
 	if !info.IsDir() {
 		return fmt.Errorf("scripts directory %s is not a directory", dir)
 	}
-	if msg := unsafePermissions(info); msg != "" {
+	if msg := unsafePermissions(dir, info); msg != "" {
 		return fmt.Errorf("scripts directory %s %s", dir, msg)
 	}
 	return nil
@@ -109,11 +109,11 @@ func (s *scriptRunner) check(ctx context.Context, params string) result {
 	if !info.Mode().IsRegular() {
 		return scriptUnknown("script %s is not a regular file", name)
 	}
-	if msg := unsafePermissions(info); msg != "" {
+	if msg := unsafePermissions(path, info); msg != "" {
 		return scriptUnknown("script %s %s, so the agent will not run it", name, msg)
 	}
-	if !executable(info) {
-		return scriptUnknown("script %s is not executable (chmod +x it)", name)
+	if !executable(path, info) {
+		return scriptUnknown("script %s is not executable (%s)", name, notExecutableHint)
 	}
 
 	select {
@@ -127,7 +127,7 @@ func (s *scriptRunner) check(ctx context.Context, params string) result {
 	defer cancel()
 
 	var stdout, stderr cappedBuffer
-	cmd := exec.CommandContext(runCtx, path)
+	cmd := scriptCommand(runCtx, path)
 	cmd.Dir = s.dir
 	cmd.Env = scriptEnv(os.Environ())
 	cmd.Stdout = &stdout
@@ -135,9 +135,10 @@ func (s *scriptRunner) check(ctx context.Context, params string) result {
 	// A script that leaves a child holding its output open would otherwise
 	// keep Wait from returning after the script itself was stopped.
 	cmd.WaitDelay = time.Second
-	stopWholeGroup(cmd)
 
-	err = cmd.Run()
+	// Run, stopping what the script started as well as the script when the
+	// time is up: a process group on Unix, a job object on Windows.
+	err = runScript(cmd)
 	if runCtx.Err() != nil {
 		if ctx.Err() != nil {
 			return scriptUnknown("script %s was stopped: the check was cancelled", name)

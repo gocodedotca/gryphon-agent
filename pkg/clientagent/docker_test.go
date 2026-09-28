@@ -155,6 +155,23 @@ func postDocker(t *testing.T, socket, action, parameters string) agent.Response 
 	return resp
 }
 
+func TestPipePath(t *testing.T) {
+	for _, tc := range []struct {
+		in, want string
+		ok       bool
+	}{
+		{"npipe:////./pipe/docker_engine", `\\.\pipe\docker_engine`, true},
+		{"npipe:////./pipe/dockerDesktopLinuxEngine", `\\.\pipe\dockerDesktopLinuxEngine`, true},
+		{"/var/run/docker.sock", "", false},
+		{"tcp://127.0.0.1:2375", "", false},
+	} {
+		got, ok := pipePath(tc.in)
+		if got != tc.want || ok != tc.ok {
+			t.Errorf("pipePath(%q) = %q, %v; want %q, %v", tc.in, got, ok, tc.want, tc.ok)
+		}
+	}
+}
+
 func TestSwarmServiceCheck(t *testing.T) {
 	engine := &fakeEngine{services: []map[string]any{
 		service("web", 3, 3, "replicated", nil),

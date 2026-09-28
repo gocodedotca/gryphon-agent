@@ -29,8 +29,9 @@ import (
 // container or service name -- is held to Docker's own name grammar before it
 // goes anywhere near a URL.
 
-// DefaultDockerSocket is where the Docker Engine listens unless told otherwise.
-const DefaultDockerSocket = "/var/run/docker.sock"
+// DefaultDockerSocket, where the Docker Engine listens unless told otherwise,
+// is per platform: a Unix socket, or on Windows the Engine's named pipe. See
+// docker_local_*.go.
 
 // dockerClient is the agent's connection to the Engine.
 type dockerClient struct {
@@ -58,8 +59,7 @@ func newDockerClient(socket string) *dockerClient {
 		base = strings.TrimSuffix(socket, "/")
 	} else {
 		transport.DialContext = func(ctx context.Context, _, _ string) (net.Conn, error) {
-			var d net.Dialer
-			return d.DialContext(ctx, "unix", socket)
+			return dialLocal(ctx, socket)
 		}
 	}
 	return &dockerClient{
@@ -135,9 +135,9 @@ func (d *dockerClient) get(ctx context.Context, path string, query url.Values, o
 func (d *dockerClient) unreachable(err error) error {
 	switch {
 	case errors.Is(err, os.ErrPermission):
-		return fmt.Errorf("cannot open %s: permission denied (the agent's user needs to be in the docker group)", d.socket)
+		return fmt.Errorf("cannot open %s: permission denied (%s)", d.socket, dockerPermissionHint)
 	case errors.Is(err, os.ErrNotExist):
-		return fmt.Errorf("cannot open %s: no such socket (is Docker running on this node?)", d.socket)
+		return fmt.Errorf("cannot open %s: not found (is Docker running on this node?)", d.socket)
 	}
 	// A dial error wraps the cause in several layers; unwrap to the sentence.
 	var opErr *net.OpError
@@ -148,6 +148,17 @@ func (d *dockerClient) unreachable(err error) error {
 		err = uerr.Err
 	}
 	return fmt.Errorf("cannot reach Docker at %s: %v", d.socket, err)
+}
+
+// pipePath turns Docker's spelling of a named pipe, npipe:////./pipe/name (the
+// form DOCKER_HOST takes), into the Windows path \\.\pipe\name. ok is false
+// for anything that is not an npipe:// address.
+func pipePath(socket string) (path string, ok bool) {
+	rest, ok := strings.CutPrefix(socket, "npipe://")
+	if !ok {
+		return "", false
+	}
+	return strings.ReplaceAll(rest, "/", `\`), true
 }
 
 // dockerName is Docker's grammar for a container or service name. Holding a

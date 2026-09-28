@@ -4,12 +4,14 @@ go 1.27.1
 
 require (
 	fyne.io/systray v1.12.2
+	github.com/Microsoft/go-winio v0.6.2
 	github.com/go-chi/chi/v5 v5.3.2
 	github.com/go-sql-driver/mysql v1.10.0
 	github.com/gomodule/redigo v1.9.3
 	github.com/jackc/pgx/v5 v5.11.0
 	github.com/prometheus-community/pro-bing v0.9.1
 	github.com/shirou/gopsutil/v4 v4.26.8
+	golang.org/x/sys v0.47.0
 )
 
 require (
@@ -28,6 +30,5 @@ require (
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect
 	golang.org/x/net v0.58.0 // indirect
 	golang.org/x/sync v0.22.0 // indirect
-	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/text v0.41.0 // indirect
 )

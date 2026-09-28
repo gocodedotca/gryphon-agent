@@ -10,7 +10,7 @@ This is the agent's source, published so that what runs on your machine can be
 read. It is exported from the repository Gryphon is developed in, so pull
 requests are read but not merged here; open an issue instead.
 
-- `cmd/client` — the agent for Linux (and for a Mac that is a server)
+- `cmd/client` — the agent for Linux and Windows (and for a Mac that is a server)
 - `cmd/client-mac` — the same agent as a macOS menu bar app, **Gryphon Agent**
 - `pkg/clientagent` — the checks and the HTTP service both of them run
 - `pkg/netcheck` — the HTTP, TCP, ping and database handshakes
@@ -42,6 +42,7 @@ Go (the version in `go.mod`) and, optionally, [Task](https://taskfile.dev).
 task build-client                         # linux/amd64 static binary at tmp/gowatcher-client
 task build-client ARCH=arm64
 task build-client OS=darwin ARCH=arm64    # headless, for a Mac that is a server
+task build-client OS=windows              # tmp/gowatcher-client.exe, for Windows on x64 (ARCH=arm64 for Arm)
 task build-client-mac                     # "tmp/Gryphon Agent.app", ad-hoc signed: runs on this machine only
 task test
 ```
@@ -51,7 +52,7 @@ Without Task: `CGO_ENABLED=0 go build -o gowatcher-client ./cmd/client`.
 ## Run
 
 Released builds come as a `.deb`, an `.rpm` and a plain archive for Linux on
-amd64 and arm64. The packages install the binary, a hardened systemd unit and
+amd64 and arm64, and a `.zip` for Windows ([below](#on-windows)). The packages install the binary, a hardened systemd unit and
 `/etc/gryphon/agent.env`, make an access key in `/etc/gryphon/agent_key`, and
 leave the agent off:
 
@@ -201,6 +202,158 @@ readable by its owner only:
 It logs to `~/Library/Logs/Gryphon Agent.log`. Once a day it asks GitHub for
 the latest release and offers a link when there is a newer one; it never
 downloads or installs anything itself.
+
+## On Windows
+
+The same agent runs on Windows 10 and 11 and Windows Server 2016 or later, on
+x64 or Arm, as a Windows service. Every check works there, with the
+differences listed below.
+
+### Install
+
+Download `gowatcher-client_<version>_windows_amd64.zip` (or `_arm64`) and
+`SHA256SUMS` from the release, and check the one against the other in
+PowerShell:
+
+```powershell
+(Get-FileHash .\gowatcher-client_<version>_windows_amd64.zip).Hash.ToLower()
+Select-String "windows_amd64.zip" .\SHA256SUMS      # the two must match
+Expand-Archive .\gowatcher-client_<version>_windows_amd64.zip -DestinationPath .\gryphon-agent
+```
+
+Then, from PowerShell opened with **Run as administrator**:
+
+```powershell
+.\gryphon-agent\gowatcher-client.exe service install
+Get-Content C:\ProgramData\Gryphon\agent_key          # paste into the host in Gryphon
+Start-Service GryphonAgent
+```
+
+`service install`:
+
+- copies the program to `C:\Program Files\Gryphon Agent\`, where only
+  administrators can replace it. The downloaded copy can be deleted afterwards.
+- makes `C:\ProgramData\Gryphon\` for the agent's key, settings and scripts.
+  Only SYSTEM and Administrators can change anything in it, and only the service
+  can read it.
+- makes an access key in `agent_key` if there isn't one, and writes a commented
+  `agent.env`.
+- registers the **GryphonAgent** service. It starts automatically at boot and
+  restarts after a failure, but install does not start it, so it doesn't
+  listen before Gryphon has the key.
+
+The service runs as the virtual account `NT SERVICE\GryphonAgent`, with no
+password and no rights beyond an ordinary user's. It listens on
+`127.0.0.1:6001`, and logs to the Application event log as source
+`GryphonAgent` (Event Viewer → Windows Logs → Application):
+
+```powershell
+Get-WinEvent -FilterHashtable @{LogName='Application'; ProviderName='GryphonAgent'} -MaxEvents 20
+```
+
+### Settings
+
+Settings go in `C:\ProgramData\Gryphon\agent.env`: the same `GWC_*` variables
+as on Linux, one per line. Restart the service after changing it:
+
+```powershell
+notepad C:\ProgramData\Gryphon\agent.env
+Restart-Service GryphonAgent
+```
+
+The key stays in `agent_key`. To rotate it, put the new key there and the old
+one in `GWC_KEY_PREVIOUS` in `agent.env`, restart, give Gryphon the new key,
+then remove `GWC_KEY_PREVIOUS` and restart again.
+
+### HTTPS
+
+As on Linux, put the agent behind a reverse proxy with TLS and give Gryphon the
+`https://` address. [Caddy](https://caddyserver.com) runs on Windows with the
+same two-line Caddyfile as above. A tunnel works too: Cloudflare Tunnel
+(`cloudflared tunnel --url http://127.0.0.1:6001`) or Tailscale Funnel
+(`tailscale funnel 6001`). While the agent listens on loopback, Windows
+Firewall needs no rule. If you set `GWC_PORT` to listen on the network, allow
+the port for the program only, and only as far as the proxy:
+
+```powershell
+New-NetFirewallRule -DisplayName "Gryphon Agent" -Direction Inbound -Action Allow `
+  -Program "C:\Program Files\Gryphon Agent\gowatcher-client.exe" -Protocol TCP -LocalPort 6001 `
+  -RemoteAddress <the proxy's address>
+```
+
+### What differs from Linux
+
+- **Disk space** takes a drive or folder as its path: `C:\`, `D:\`, or
+  `C:\ClusterStorage\Volume1`. The default, `/`, is the root of the drive the
+  agent runs from, which for the service is the system drive. Windows has no
+  inodes, so only space is judged.
+- **Load** doesn't exist as such on Windows. The agent reports an estimate
+  built from the processor queue length, sampled every five seconds from the
+  first time a load check asks. That first answer is 0, and the figure settles
+  within a minute or two. CPU is
+  the better check on Windows.
+- **Ping**: sending ICMP needs an administrator on Windows, so under the
+  service the check normally uses its fallback, a TCP probe of ports 443, 80
+  and 22, as on Linux. A host that answers on none of them reports unknown,
+  not down.
+- **Docker** is reached through Docker's named pipe,
+  `npipe:////./pipe/docker_engine`, which is the default. Docker Desktop lets
+  Administrators and the `docker-users` group open it, so add the service's
+  account and restart:
+
+  ```powershell
+  net localgroup docker-users "NT SERVICE\GryphonAgent" /add
+  Restart-Service GryphonAgent
+  ```
+
+  As on Linux, that access is equivalent to administrator rights on the
+  machine. Docker Desktop's **Expose daemon on tcp://localhost:2375** setting
+  with `GWC_DOCKER_SOCKET=tcp://127.0.0.1:2375` is the alternative. It doesn't
+  need the group, but every local user can reach that port.
+- **Scripts** run from `C:\ProgramData\Gryphon\scripts` once `agent.env` has
+  `GWC_SCRIPTS_DIR=C:\ProgramData\Gryphon\scripts`. Gryphon sends the full file
+  name, extension included (`disk_queue.ps1`), and the agent runs `.exe`,
+  `.com`, `.bat`, `.cmd` and `.ps1` files. A `.ps1` runs in Windows
+  PowerShell, bypassing the execution policy for that file only. Exit codes
+  are read as on Linux (`exit 2` in PowerShell, `exit /b 2` in a batch file).
+  Scripts time out after 10 seconds, and the agent then ends everything the
+  script started.
+
+  The rules are the Linux ones in Windows terms. The folder and each script
+  must be owned by SYSTEM, Administrators, an administrator or the agent's
+  account, and nobody else may be allowed to change, add, delete or
+  re-permission them. A file created in the scripts folder picks up permissions
+  that pass. A file **moved** in from elsewhere keeps its old permissions, and
+  the agent refuses it with a message naming the account that can change it
+  and the `icacls` command that fixes it. A folder you make yourself under
+  `C:\ProgramData` fails until its permissions are narrowed, because
+  ProgramData lets every user create files in new folders.
+
+### Updating and removing
+
+To update, download the newer zip and run its `service install` from an
+elevated PowerShell. It stops the service, replaces the program, and starts it
+again, keeping the key and `agent.env`.
+
+```powershell
+& "C:\Program Files\Gryphon Agent\gowatcher-client.exe" service uninstall
+```
+
+removes the service and its event log source. It keeps
+`C:\ProgramData\Gryphon` (key and settings) and `C:\Program Files\Gryphon Agent`.
+Delete both to remove everything.
+
+### Without the service
+
+The program also runs in a console, configured like on Linux, for trying it
+out:
+
+```powershell
+$env:GWC_KEY = (.\gowatcher-client.exe -genkey)
+.\gowatcher-client.exe -port 127.0.0.1:6001
+```
+
+Stop it with Ctrl+C.
 
 ## Licence
 

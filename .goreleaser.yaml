@@ -1,5 +1,5 @@
-# Releases of the Linux agent, built by .github/workflows/release.yml when a
-# v* tag is pushed, as a draft to look over and publish by hand.
+# Releases of the Linux and Windows agent, built by .github/workflows/release.yml
+# when a v* tag is pushed, as a draft to look over and publish by hand.
 #
 #   goreleaser release --snapshot --clean   # try it locally, publishes nothing
 #
@@ -24,6 +24,15 @@ builds:
     flags: [-trimpath]
     ldflags:
       - -s -w -X github.com/gocodedotca/gryphon-agent/pkg/version.Override={{.Tag}}
+  - id: client-windows
+    main: ./cmd/client
+    binary: gowatcher-client
+    env: [CGO_ENABLED=0]
+    goos: [windows]
+    goarch: [amd64, arm64]
+    flags: [-trimpath]
+    ldflags:
+      - -s -w -X github.com/gocodedotca/gryphon-agent/pkg/version.Override={{.Tag}}
 
 archives:
   # The archive carries the unit and scripts, because install.sh installs
@@ -35,6 +44,15 @@ archives:
     files:
       - LICENSE
       - deploy/agent/*
+  # Windows: the program, which installs itself as a service
+  # (gowatcher-client service install), and the README that says how.
+  - id: client-windows
+    ids: [client-windows]
+    name_template: "gowatcher-client_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    formats: [zip]
+    files:
+      - LICENSE
+      - README.md
 
 checksum:
   name_template: SHA256SUMS

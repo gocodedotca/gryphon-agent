@@ -9,6 +9,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -119,6 +120,17 @@ func loadConfig(args []string, getenv func(string) string) (config, error) {
 }
 
 func main() {
+	// "service install" and "service uninstall" manage the Windows service;
+	// see service_windows.go.
+	if len(os.Args) > 1 && os.Args[1] == "service" {
+		os.Exit(serviceCommand(os.Args[2:]))
+	}
+	// Started by the Windows service manager rather than from a console.
+	if isService() {
+		runService()
+		return
+	}
+
 	cfg, err := loadConfig(os.Args[1:], os.Getenv)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -139,18 +151,9 @@ func main() {
 		return
 	}
 
-	var handler slog.Handler
-	if cfg.logFormat == "json" {
-		handler = slog.NewJSONHandler(os.Stdout, nil)
-	} else {
-		handler = slog.NewTextHandler(os.Stdout, nil)
-	}
-	log := slog.New(handler)
-	log.Info("starting Gryphon client agent", "version", version.Version())
-
-	ag := clientagent.New(cfg.agent, log)
-	if err := ag.Start(); err != nil {
-		log.Error("cannot start", "error", err)
+	log := newLogger(os.Stdout, cfg.logFormat, true)
+	ag, err := startAgent(cfg, log)
+	if err != nil {
 		os.Exit(1)
 	}
 
@@ -159,13 +162,49 @@ func main() {
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 	sig := <-stop
 	log.Info("shutting down", "signal", sig.String())
+	stopAgent(ag, log)
+}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+// newLogger logs in the configured format. withTime is false where the
+// destination stamps each line itself, as the Windows event log does.
+func newLogger(w io.Writer, format string, withTime bool) *slog.Logger {
+	opts := &slog.HandlerOptions{}
+	if !withTime {
+		opts.ReplaceAttr = func(groups []string, a slog.Attr) slog.Attr {
+			if len(groups) == 0 && a.Key == slog.TimeKey {
+				return slog.Attr{}
+			}
+			return a
+		}
+	}
+	if format == "json" {
+		return slog.New(slog.NewJSONHandler(w, opts))
+	}
+	return slog.New(slog.NewTextHandler(w, opts))
+}
+
+// startAgent starts listening, logging why when it cannot.
+func startAgent(cfg config, log *slog.Logger) (*clientagent.Agent, error) {
+	log.Info("starting Gryphon client agent", "version", version.Version())
+	ag := clientagent.New(cfg.agent, log)
+	if err := ag.Start(); err != nil {
+		log.Error("cannot start", "error", err)
+		return nil, err
+	}
+	return ag, nil
+}
+
+// stopAgent stops listening and gives in-flight checks ten seconds to finish.
+func stopAgent(ag *clientagent.Agent, log *slog.Logger) {
+	ctx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
 	defer cancel()
 	if err := ag.Stop(ctx); err != nil && !errors.Is(err, context.DeadlineExceeded) {
 		log.Error("shutdown", "error", err)
 	}
 }
+
+// shutdownGrace is how long stopAgent waits for checks in flight.
+const shutdownGrace = 10 * time.Second
 
 // envInt reads a whole number from the environment, or def when it is unset;
 // a value that is not a number is reported as the flag's own parse error
