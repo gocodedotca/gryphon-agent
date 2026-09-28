@@ -1,0 +1,54 @@
+# The Gryphon client agent, as systemd runs it.
+#
+# Shipped in the .deb and .rpm and installed by install.sh. The agent listens
+# on loopback only; put a reverse proxy with TLS in front of it (Caddyfile
+# beside this file) and give Gryphon the https:// URL.
+#
+# Settings go in /etc/gryphon/agent.env (GWC_* variables; see the readme). The
+# access key is /etc/gryphon/agent_key, readable by root only; systemd hands a
+# copy to the service, which never sees the original.
+[Unit]
+Description=Gryphon client agent
+Documentation=https://github.com/gocodedotca/gryphon-agent#readme
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/bin/gowatcher-client
+Environment=GWC_PORT=127.0.0.1:6001
+EnvironmentFile=-/etc/gryphon/agent.env
+LoadCredential=agent_key:/etc/gryphon/agent_key
+Environment=GWC_KEY_FILE=%d/agent_key
+Restart=on-failure
+RestartSec=5
+
+# A user made for the service and gone when it stops: nothing on the machine
+# is owned by it, so nothing it could change survives it.
+DynamicUser=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictNamespaces=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+# No capabilities at all. For ICMP in the ping check, replace this line with
+# the two below it; without them the check probes TCP 443, 80 and 22 instead.
+CapabilityBoundingSet=
+#CapabilityBoundingSet=CAP_NET_RAW
+#AmbientCapabilities=CAP_NET_RAW
+
+# Container and Swarm checks. Recommended: a docker-socket-proxy that allows
+# only reads of containers, services and tasks, reached over TCP -- set
+#   GWC_DOCKER_SOCKET=tcp://127.0.0.1:2375
+# in agent.env. The alternative below opens the Engine's own socket, which is
+# root on this machine to whoever holds it.
+#SupplementaryGroups=docker
+
+[Install]
+WantedBy=multi-user.target

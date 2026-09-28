@@ -1,0 +1,10 @@
+# Caddy in front of the Gryphon agent: TLS from Let's Encrypt, and the agent
+# itself on loopback. Replace the name with the host's own; its DNS must point
+# here and ports 80 and 443 must be open for the certificate.
+#
+# Caddy passes the Authorization header through as it is, which the agent
+# needs. Do not add authentication of Caddy's own: Gryphon sends only the
+# agent's key.
+agent.example.com {
+	reverse_proxy 127.0.0.1:6001
+}

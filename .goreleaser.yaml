@@ -1,0 +1,79 @@
+# Releases of the Linux agent, built by .github/workflows/release.yml when a
+# v* tag is pushed, as a draft to look over and publish by hand.
+#
+#   goreleaser release --snapshot --clean   # try it locally, publishes nothing
+#
+# The Mac agent is a notarized DMG, signed on a Mac and attached to the same
+# release by hand; the Homebrew cask (deploy/homebrew) is built from its URL.
+# The release goes to the repository this runs in, which is where install.sh,
+# the Mac app's update check and the cask all look.
+version: 2
+project_name: gryphon-agent
+
+before:
+  hooks:
+    - go mod download
+
+builds:
+  - id: client
+    main: ./cmd/client
+    binary: gowatcher-client
+    env: [CGO_ENABLED=0]
+    goos: [linux]
+    goarch: [amd64, arm64]
+    flags: [-trimpath]
+    ldflags:
+      - -s -w -X github.com/gocodedotca/gryphon-agent/pkg/version.Override={{.Tag}}
+
+archives:
+  # The archive carries the unit and scripts, because install.sh installs
+  # from it. Its name is what install.sh asks for.
+  - id: client
+    ids: [client]
+    name_template: "gowatcher-client_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    formats: [tar.gz]
+    files:
+      - LICENSE
+      - deploy/agent/*
+
+checksum:
+  name_template: SHA256SUMS
+  algorithm: sha256
+
+nfpms:
+  - id: client
+    ids: [client]
+    package_name: gryphon-agent
+    file_name_template: "gryphon-agent_{{ .Version }}_{{ .Arch }}"
+    vendor: Gryphon
+    homepage: https://github.com/gocodedotca/gryphon-agent
+    maintainer: Trevor Sawler <trevor.sawler@gmail.com>
+    description: Gryphon client agent, measuring a host for the Gryphon monitoring server.
+    license: MIT
+    formats: [deb, rpm]
+    bindir: /usr/bin
+    contents:
+      - src: deploy/agent/gryphon-agent.service
+        dst: /usr/lib/systemd/system/gryphon-agent.service
+      - src: deploy/agent/agent.env
+        dst: /etc/gryphon/agent.env
+        type: config|noreplace
+        file_info:
+          mode: 0644
+      - src: deploy/agent/Caddyfile
+        dst: /usr/share/doc/gryphon-agent/Caddyfile
+      - src: deploy/agent/docker-socket-proxy.yml
+        dst: /usr/share/doc/gryphon-agent/docker-socket-proxy.yml
+    scripts:
+      postinstall: deploy/agent/postinstall.sh
+      preremove: deploy/agent/preremove.sh
+
+release:
+  # A tag on the wrong commit is a mistake to catch, not a release.
+  draft: true
+  prerelease: auto
+
+changelog:
+  use: git
+  filters:
+    exclude: ["^docs:", "^test:", "^ci:"]

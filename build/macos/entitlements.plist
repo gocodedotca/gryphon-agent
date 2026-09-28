@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	Hardened runtime, no App Sandbox. The agent listens on a port and reads
+	the usage of the whole disk; the sandbox would allow neither without
+	entitlements the Mac App Store does not grant to this kind of app, and
+	the app is distributed outside the store anyway. A Go binary needs no
+	hardened-runtime exceptions.
+	-->
+</dict>
+</plist>

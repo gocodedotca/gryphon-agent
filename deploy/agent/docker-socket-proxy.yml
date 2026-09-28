@@ -1,0 +1,21 @@
+# A read-only window onto the Docker Engine for the Gryphon agent's container
+# and Swarm checks, instead of the socket itself (which is root on the host).
+#
+#   docker compose -f docker-socket-proxy.yml up -d
+#
+# then GWC_DOCKER_SOCKET=tcp://127.0.0.1:2375 in /etc/gryphon/agent.env.
+# Only GETs of containers, services and tasks are let through -- the three
+# things the agent asks about -- and the port is bound to loopback.
+services:
+  docker-socket-proxy:
+    image: tecnativa/docker-socket-proxy:latest
+    restart: unless-stopped
+    environment:
+      CONTAINERS: 1
+      SERVICES: 1
+      TASKS: 1
+      POST: 0
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    ports:
+      - "127.0.0.1:2375:2375"
