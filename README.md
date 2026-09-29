@@ -3,7 +3,8 @@
 The agent for Gryphon, a monitoring service. It runs on
 a monitored host and measures what checks from outside cannot see: disk,
 memory, CPU and load, databases and services on the host's own network, Docker
-containers and Swarm services, and scripts you put there. Gryphon posts to it
+containers and Swarm services, the age of the files your jobs leave behind,
+and scripts you put there. Gryphon posts to it
 with the host's access key and it answers with a status.
 
 This is the agent's source, published so that what runs on your machine can be
@@ -23,8 +24,9 @@ requests are read but not merged here; open an issue instead.
 It measures the **node** it runs on: disk, memory and CPU readings are the
 machine's, even inside a container. It answers the disk space, memory, CPU,
 load, Postgres, MariaDB/MySQL, Redis, HTTP, HTTPS, ping, TCP, Swarm service,
-Swarm stack, container, container memory and container CPU checks, and scripts
-when a scripts directory is set. `GET /test` returns that list.
+Swarm stack, container, container memory and container CPU checks, scripts when
+a scripts directory is set, and file freshness when watched folders are set.
+`GET /test` returns that list.
 
 There are no thresholds in the agent. It measures and reports numbers; what
 counts as a warning or a problem is decided by the server, per check.
@@ -86,6 +88,7 @@ orchestrator.
 | `GWC_LOG_FORMAT`     | `-logformat`   | `text`    | `text` or `json` |
 | `GWC_DOCKER_SOCKET`  | `-docker-socket` | `/var/run/docker.sock` | The Docker Engine, for the container and Swarm checks: a socket path, or `tcp://host:port` for a socket proxy |
 | `GWC_MAX_CONCURRENT` | `-max-concurrent` | `32`     | How many checks may run at once; past it a check answers unknown, "the agent is busy" |
+| `GWC_WATCH_DIRS`     | `-watch-dirs`  | *(none)*  | Folders the file freshness checks may look in, separated as `PATH` is (`:` on Unix, `;` on Windows). Unset, file checks are off |
 | `GWC_SCRIPTS_DIR`    | `-scripts-dir` | *(none)*  | Directory of executables the script checks run by name. Unset, script checks are off |
 | `GWC_ALLOW_PUBLIC_TARGETS` | `-allow-public-targets` | `false` | Let the network and database checks dial the public internet (below) |
 |                      | `-genkey`      |           | Print a new access key and exit |
@@ -148,6 +151,22 @@ arguments is a two-line wrapper:
 exec /usr/lib/nagios/plugins/check_procs -c 1: -C nginx
 ```
 
+## File checks
+
+A file freshness check asks how long ago a file was written, or, for a folder,
+the newest regular file directly in it (not its subfolders), optionally only
+names matching a pattern such as `*.sql.gz`. The agent reports the age in hours
+and the server grades it; a missing file, a folder with no matching file, or a
+file under the check's minimum size is reported as a problem by the agent
+itself.
+
+Gryphon sends an absolute path, and the agent answers only for paths inside a
+folder in `GWC_WATCH_DIRS`. Anything else is refused before the file system is
+asked, so neither a Gryphon login nor the key can learn what exists elsewhere.
+Links are followed only while they stay inside those folders, links inside a
+folder are passed over, and a folder of more than 100,000 entries is refused.
+The agent lists folders and reads dates and sizes; it never opens a file.
+
 ## Ping and Docker
 
 Ping uses ICMP where the agent may send it, and a TCP probe of 443, 80 and 22
@@ -177,6 +196,8 @@ CapabilityBoundingSet=CAP_NET_RAW
 AmbientCapabilities=CAP_NET_RAW
 # Direct access to the Docker socket (root-equivalent; prefer the proxy)
 SupplementaryGroups=docker
+# A group that may list a watched folder, for the file freshness checks
+#SupplementaryGroups=backup
 ```
 
 ## On macOS
@@ -195,6 +216,7 @@ readable by its owner only:
   "access_key": "<key>",
   "enabled": true,
   "scripts_dir": "/Users/you/Library/Application Support/Gryphon Agent/scripts",
+  "watch_dirs": ["/Users/you/Backups"],
   "allow_public_targets": false
 }
 ```
@@ -318,6 +340,9 @@ New-NetFirewallRule -DisplayName "Gryphon Agent" -Direction Inbound -Action Allo
   are read as on Linux (`exit 2` in PowerShell, `exit /b 2` in a batch file).
   Scripts time out after 10 seconds, and the agent then ends everything the
   script started.
+- **File checks** look in the folders `GWC_WATCH_DIRS` names, separated by
+  semicolons (`D:\Backups;C:\ProgramData\MyApp\exports`). The service's
+  account must be able to list them.
 
   The rules are the Linux ones in Windows terms. The folder and each script
   must be owned by SYSTEM, Administrators, an administrator or the agent's

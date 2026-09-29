@@ -5,6 +5,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -19,7 +20,7 @@ func TestSettingsMissingFileIsDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s != defaultSettings() {
+	if !reflect.DeepEqual(s, defaultSettings()) {
 		t.Errorf("got %+v, want defaults", s)
 	}
 	if !s.Enabled {

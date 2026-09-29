@@ -60,6 +60,8 @@ func loadConfig(args []string, getenv func(string) string) (config, error) {
 		"the Docker Engine's socket, for the container and Swarm checks")
 	scriptsDir := fs.String("scripts-dir", envOr("SCRIPTS_DIR", ""),
 		"directory of executables the script checks may run by name; empty turns script checks off")
+	watchDirs := fs.String("watch-dirs", envOr("WATCH_DIRS", ""),
+		"folders the file-age checks may look in, separated as PATH is; empty turns file checks off")
 	allowPublic := fs.Bool("allow-public-targets", allowPublicTargets,
 		"let the network and database checks dial the public internet; off by default, so the agent reaches its own network only")
 	maxConcurrent := fs.Int("max-concurrent", envInt(env, "MAX_CONCURRENT", clientagent.DefaultMaxConcurrent),
@@ -89,6 +91,7 @@ func loadConfig(args []string, getenv func(string) string) (config, error) {
 	c.agent.Addr = *port
 	c.agent.DockerSocket = *dockerSocket
 	c.agent.ScriptsDir = strings.TrimSpace(*scriptsDir)
+	c.agent.WatchDirs = clientagent.SplitWatchDirs(*watchDirs)
 	c.agent.AllowPublicTargets = *allowPublic
 	c.agent.MaxConcurrent = *maxConcurrent
 	c.agent.PreviousKey = strings.TrimSpace(previousKey)
@@ -109,6 +112,9 @@ func loadConfig(args []string, getenv func(string) string) (config, error) {
 		if err := clientagent.ValidateScriptsDir(c.agent.ScriptsDir); err != nil {
 			return c, fmt.Errorf("GWC_SCRIPTS_DIR: %w", err)
 		}
+	}
+	if err := clientagent.ValidateWatchDirs(c.agent.WatchDirs); err != nil {
+		return c, fmt.Errorf("GWC_WATCH_DIRS: %w", err)
 	}
 
 	c.agent.Key = strings.TrimSpace(key)

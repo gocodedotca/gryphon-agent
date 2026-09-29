@@ -235,6 +235,16 @@ const (
 	// from the directory the agent was configured with. Never a path; see
 	// ValidScriptName.
 	ParamScript = "script"
+
+	// The file-age check's settings. ParamPath is an absolute path inside
+	// one of the folders the agent was told it may look in: a file, or a
+	// folder whose newest file is judged. ParamPattern narrows a folder to
+	// the names matching a glob ("*.sql.gz"). ParamMinSize is a size in
+	// bytes, as digits, below which the file is a problem; absent means any
+	// size will do.
+	ParamPath    = "path"
+	ParamPattern = "pattern"
+	ParamMinSize = "min_size"
 )
 
 // MaxScriptName bounds a script check's name.
@@ -258,4 +268,96 @@ func ValidScriptName(name string) bool {
 		}
 	}
 	return true
+}
+
+// ParseSize reads a size as a person writes one -- "500", "10 KB", "1.5MB",
+// "2 GiB" -- into bytes. Units are binary, as ls -lh and du report them: a KB
+// is 1024 bytes. The server reads the form's value with it before storing the
+// check, and sends the agent the bytes, so the two cannot disagree about what
+// "1 MB" meant.
+func ParseSize(s string) (int64, error) {
+	s = strings.ToUpper(strings.ReplaceAll(strings.TrimSpace(s), " ", ""))
+	if s == "" {
+		return 0, errors.New("no size given")
+	}
+	i := 0
+	for i < len(s) && (s[i] >= '0' && s[i] <= '9' || s[i] == '.') {
+		i++
+	}
+	number, unit := s[:i], strings.TrimSuffix(strings.TrimSuffix(s[i:], "IB"), "B")
+	if number == "" {
+		return 0, fmt.Errorf("%q does not start with a number", s)
+	}
+	var value float64
+	if _, err := fmt.Sscanf(number, "%g", &value); err != nil {
+		return 0, fmt.Errorf("%q is not a number", number)
+	}
+	multiplier := map[string]float64{"": 1, "K": 1 << 10, "M": 1 << 20, "G": 1 << 30, "T": 1 << 40}
+	m, ok := multiplier[unit]
+	if !ok {
+		return 0, fmt.Errorf("%q is not a size unit: use B, KB, MB, GB or TB", s[i:])
+	}
+	bytes := value * m
+	if bytes < 0 || bytes > 1<<62 {
+		return 0, fmt.Errorf("%q is out of range", s)
+	}
+	return int64(bytes), nil
+}
+
+// FormatSize says a size in bytes the way ParseSize reads one.
+func FormatSize(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d bytes", n)
+	}
+	div, exp := int64(unit), 0
+	for m := n / unit; m >= unit && exp < 3; m /= unit {
+		div *= unit
+		exp++
+	}
+	value := float64(n) / float64(div)
+	suffix := []string{"KB", "MB", "GB", "TB"}[exp]
+	if value >= 100 || value == float64(int64(value)) {
+		return fmt.Sprintf("%.0f %s", value, suffix)
+	}
+	return fmt.Sprintf("%.1f %s", value, suffix)
+}
+
+// HumanDuration says a duration the way a message should: in the largest
+// whole unit, and the next one down when that adds something, so a day and a
+// half is "1 day 12 hours" and not "36 hours" or "1 day".
+func HumanDuration(d time.Duration) string {
+	if d < time.Minute {
+		return plural(int(d/time.Second), "second")
+	}
+	units := []struct {
+		d    time.Duration
+		name string
+	}{
+		{24 * time.Hour, "day"},
+		{time.Hour, "hour"},
+		{time.Minute, "minute"},
+	}
+	for i, u := range units {
+		if d < u.d {
+			continue
+		}
+		whole := int(d / u.d)
+		out := plural(whole, u.name)
+		if i+1 < len(units) {
+			next := units[i+1]
+			if rest := int((d % u.d) / next.d); rest > 0 {
+				out += " " + plural(rest, next.name)
+			}
+		}
+		return out
+	}
+	return plural(0, "second")
+}
+
+func plural(n int, unit string) string {
+	if n == 1 {
+		return "1 " + unit
+	}
+	return fmt.Sprintf("%d %ss", n, unit)
 }

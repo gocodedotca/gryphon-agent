@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -123,5 +124,29 @@ func TestClientScriptsDir(t *testing.T) {
 	env["GWC_SCRIPTS_DIR"] = dir + "/missing"
 	if _, err := loadConfig(nil, getenv); err == nil {
 		t.Error("a scripts directory that does not exist was accepted")
+	}
+}
+
+func TestClientWatchDirs(t *testing.T) {
+	env := map[string]string{"GWC_KEY": "test-key-0123456789abcdefghijklmnopqrstuvwxyz"}
+	getenv := func(k string) string { return env[k] }
+
+	cfg, err := loadConfig(nil, getenv)
+	if err != nil || len(cfg.agent.WatchDirs) != 0 {
+		t.Fatalf("default: %q, %v; want file checks off", cfg.agent.WatchDirs, err)
+	}
+
+	a, b := t.TempDir(), t.TempDir()
+	env["GWC_WATCH_DIRS"] = a + string(filepath.ListSeparator) + b
+	if cfg, err = loadConfig(nil, getenv); err != nil || len(cfg.agent.WatchDirs) != 2 || cfg.agent.WatchDirs[1] != b {
+		t.Errorf("from the environment: %q, %v", cfg.agent.WatchDirs, err)
+	}
+	if cfg, err = loadConfig([]string{"-watch-dirs", a}, getenv); err != nil || len(cfg.agent.WatchDirs) != 1 {
+		t.Errorf("the flag wins: %q, %v", cfg.agent.WatchDirs, err)
+	}
+
+	env["GWC_WATCH_DIRS"] = filepath.Join(a, "missing")
+	if _, err := loadConfig(nil, getenv); err == nil || !strings.Contains(err.Error(), "GWC_WATCH_DIRS") {
+		t.Errorf("a watched folder that does not exist: %v; want a refusal naming GWC_WATCH_DIRS", err)
 	}
 }

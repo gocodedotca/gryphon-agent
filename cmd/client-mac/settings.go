@@ -32,6 +32,10 @@ type settings struct {
 	// choosing what may run on this Mac is done by editing this file, on
 	// purpose. Empty, the default, turns script checks off.
 	ScriptsDir string `json:"scripts_dir,omitempty"`
+	// WatchDirs are the folders file-age checks may look in, as
+	// GWC_WATCH_DIRS is for the Linux agent, and edited here for the same
+	// reason as ScriptsDir. Empty, the default, turns file checks off.
+	WatchDirs []string `json:"watch_dirs,omitempty"`
 	// AllowPublicTargets lets the network and database checks dial the public
 	// internet, as GWC_ALLOW_PUBLIC_TARGETS does for the Linux agent. Off by
 	// default, so the agent reaches this Mac's own network and no further.
@@ -49,6 +53,7 @@ func (s settings) agentConfig() (clientagent.Config, error) {
 		Addr:               s.Port,
 		Key:                strings.TrimSpace(s.AccessKey),
 		ScriptsDir:         strings.TrimSpace(s.ScriptsDir),
+		WatchDirs:          s.WatchDirs,
 		AllowPublicTargets: s.AllowPublicTargets,
 	}
 	if err := clientagent.ValidateKey(cfg.Key); err != nil {
@@ -58,6 +63,9 @@ func (s settings) agentConfig() (clientagent.Config, error) {
 		if err := clientagent.ValidateScriptsDir(cfg.ScriptsDir); err != nil {
 			return clientagent.Config{}, fmt.Errorf("scripts_dir: %w", err)
 		}
+	}
+	if err := clientagent.ValidateWatchDirs(cfg.WatchDirs); err != nil {
+		return clientagent.Config{}, fmt.Errorf("watch_dirs: %w", err)
 	}
 	return cfg, nil
 }
