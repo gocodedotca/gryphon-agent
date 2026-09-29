@@ -44,8 +44,14 @@ type settings struct {
 	AllowPublicTargets bool `json:"allow_public_targets,omitempty"`
 }
 
+// defaultPort is loopback, unlike clientagent.DefaultAddr: a Mac is reached
+// through a tunnel on the same machine, and the app turns itself on at first
+// launch, so every interface would put the agent on the local network before
+// its owner had chosen anything.
+const defaultPort = "127.0.0.1:6001"
+
 func defaultSettings() settings {
-	return settings{Port: clientagent.DefaultAddr, Enabled: true}
+	return settings{Port: defaultPort, Enabled: true}
 }
 
 func (s settings) agentConfig() (clientagent.Config, error) {
