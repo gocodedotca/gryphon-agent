@@ -17,7 +17,7 @@ before:
 builds:
   - id: client
     main: ./cmd/client
-    binary: gowatcher-client
+    binary: gryphon-agent
     env: [CGO_ENABLED=0]
     goos: [linux]
     goarch: [amd64, arm64]
@@ -26,7 +26,7 @@ builds:
       - -s -w -X github.com/gocodedotca/gryphon-agent/pkg/version.Override={{.Tag}}
   - id: client-windows
     main: ./cmd/client
-    binary: gowatcher-client
+    binary: gryphon-agent
     env: [CGO_ENABLED=0]
     goos: [windows]
     goarch: [amd64, arm64]
@@ -39,16 +39,16 @@ archives:
   # from it. Its name is what install.sh asks for.
   - id: client
     ids: [client]
-    name_template: "gowatcher-client_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    name_template: "gryphon-agent_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     formats: [tar.gz]
     files:
       - LICENSE
       - deploy/agent/*
   # Windows: the program, which installs itself as a service
-  # (gowatcher-client service install), and the README that says how.
+  # (gryphon-agent service install), and the README that says how.
   - id: client-windows
     ids: [client-windows]
-    name_template: "gowatcher-client_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    name_template: "gryphon-agent_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     formats: [zip]
     files:
       - LICENSE

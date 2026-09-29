@@ -52,7 +52,7 @@ func loadConfig(args []string, getenv func(string) string) (config, error) {
 	var allowPublicTargets bool
 	env.Bool("ALLOW_PUBLIC_TARGETS", &allowPublicTargets)
 
-	fs := flag.NewFlagSet("gowatcher-client", flag.ContinueOnError)
+	fs := flag.NewFlagSet("gryphon-agent", flag.ContinueOnError)
 	port := fs.String("port", envOr("PORT", clientagent.DefaultAddr),
 		"address to listen on: :6001, or 127.0.0.1:6001 behind a reverse proxy on this machine")
 	logFormat := fs.String("logformat", envOr("LOG_FORMAT", "text"), "log format: text or json")

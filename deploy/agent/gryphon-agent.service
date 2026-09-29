@@ -14,7 +14,7 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-ExecStart=/usr/bin/gowatcher-client
+ExecStart=/usr/bin/gryphon-agent
 Environment=GWC_PORT=127.0.0.1:6001
 EnvironmentFile=-/etc/gryphon/agent.env
 LoadCredential=agent_key:/etc/gryphon/agent_key

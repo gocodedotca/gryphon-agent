@@ -6,7 +6,7 @@ set -e
 install -d -m 0755 /etc/gryphon
 if [ ! -s /etc/gryphon/agent_key ]; then
 	umask 077
-	/usr/bin/gowatcher-client -genkey > /etc/gryphon/agent_key
+	/usr/bin/gryphon-agent -genkey > /etc/gryphon/agent_key
 	chmod 0600 /etc/gryphon/agent_key
 	echo "Gryphon agent: made an access key in /etc/gryphon/agent_key."
 	echo "  Paste it into the host's Agent Access Key in Gryphon, then:"
