@@ -204,8 +204,8 @@ SupplementaryGroups=docker
 
 **Gryphon Agent** is the same agent as a menu bar app: no Dock icon, no window,
 a menu to turn it on and off, open it at login, copy the access key and edit
-its settings. On first launch it listens on port 6001 on every interface and
-makes a new key; set the port to loopback before exposing it through anything.
+its settings. On first launch it turns itself on, listening on
+`127.0.0.1:6001` (this Mac only, for a tunnel to reach), and makes a new key.
 
 Settings live in `~/Library/Application Support/Gryphon Agent/config.json`,
 readable by its owner only:
