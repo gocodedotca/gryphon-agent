@@ -17,6 +17,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -68,6 +69,12 @@ type Config struct {
 	// may run on this machine is its administrator's decision, made here,
 	// and never something Gryphon can send. See checks-script.go.
 	ScriptsDir string
+	// WatchDirs are the folders file-age checks may look in: the check's
+	// path must be inside one of them. Empty turns file checks off, which is
+	// the default, for the same reason as ScriptsDir: which of this
+	// machine's files Gryphon may ask about is its administrator's decision.
+	// See checks-file.go.
+	WatchDirs []string
 	// PreviousKey is a second key accepted alongside Key, for rotation: the
 	// agent is restarted with the new key as Key and the old one here, the
 	// host in Gryphon is given the new key, and the old one is dropped on
@@ -123,6 +130,13 @@ func (c Config) withDefaults() Config {
 		c.DockerSocket = DefaultDockerSocket
 	}
 	c.ScriptsDir = strings.TrimSpace(c.ScriptsDir)
+	var dirs []string
+	for _, d := range c.WatchDirs {
+		if d = strings.TrimSpace(d); d != "" {
+			dirs = append(dirs, filepath.Clean(d))
+		}
+	}
+	c.WatchDirs = dirs
 	return c
 }
 

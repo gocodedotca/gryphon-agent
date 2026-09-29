@@ -25,6 +25,7 @@ type handlers struct {
 	log     *slog.Logger
 	docker  *dockerClient
 	scripts *scriptRunner
+	files   *fileWatcher
 	net     *netProbe
 	// slots bounds the checks in flight; see Config.MaxConcurrent.
 	slots chan struct{}
@@ -60,6 +61,7 @@ func newHandlers(cfg Config, log *slog.Logger) *handlers {
 		log:     log,
 		docker:  newDockerClient(cfg.DockerSocket),
 		scripts: newScriptRunner(cfg.ScriptsDir),
+		files:   newFileWatcher(cfg.WatchDirs),
 		net:     newNetProbe(cfg.reach()),
 		slots:   make(chan struct{}, cfg.MaxConcurrent),
 		denials: ratelimit.New(denialLimit, denialWindow),
@@ -81,6 +83,9 @@ func (app *handlers) checkNames() []string {
 	if app.cfg.ScriptsDir != "" {
 		names = append(names, "script")
 	}
+	if len(app.cfg.WatchDirs) > 0 {
+		names = append(names, "file-age")
+	}
 	sort.Strings(names)
 	return names
 }
@@ -98,6 +103,9 @@ func (app *handlers) checkNames() []string {
 //     the server holds the thresholds
 //   - either kind that could not run at all sets statusID to StatusUnknown,
 //     which is not the same claim as the thing being broken
+//   - the file-age check is the one exception: it measures an age and may
+//     also say StatusProblem, for a file that is missing or too small,
+//     which no threshold on the age could make acceptable
 type result struct {
 	statusID    int
 	msg         string
@@ -269,6 +277,9 @@ func (app *handlers) lookup(action string) (checkFunc, bool) {
 	}
 	if action == "script" {
 		return app.scripts.check, true
+	}
+	if action == "file-age" {
+		return app.files.check, true
 	}
 	return nil, false
 }

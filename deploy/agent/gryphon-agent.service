@@ -50,5 +50,12 @@ CapabilityBoundingSet=
 # root on this machine to whoever holds it.
 #SupplementaryGroups=docker
 
+# File freshness checks (GWC_WATCH_DIRS in agent.env) list the folders named
+# there; they never open a file. The service's user is made fresh and belongs
+# to no group, so a folder it may not list -- /var/backups owned by root:backup
+# with mode 0750, say -- needs that group added, in a drop-in
+# (systemctl edit gryphon-agent) alongside docker if both are wanted:
+#SupplementaryGroups=backup
+
 [Install]
 WantedBy=multi-user.target

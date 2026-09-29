@@ -464,6 +464,10 @@ const windowsAgentEnv = `# Settings for the Gryphon Agent service. Restart the s
 # The folder below was made by install with permissions the agent accepts.
 #GWC_SCRIPTS_DIR=C:\ProgramData\Gryphon\scripts
 
+# Folders the file-age check may look in, separated by semicolons. A check's
+# path must be inside one of them; unset, file checks are off.
+#GWC_WATCH_DIRS=D:\Backups;C:\ProgramData\MyApp\exports
+
 # How many checks may run at once. Not a positive number means 32.
 #GWC_MAX_CONCURRENT=32
 
