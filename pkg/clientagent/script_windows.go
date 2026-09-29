@@ -23,7 +23,7 @@ import (
 //
 // C:\ProgramData lets every user create files in a new folder under it, so a
 // scripts folder made there by hand fails this until its permissions are
-// narrowed. `gowatcher-client service install` makes C:\ProgramData\Gryphon
+// narrowed. `gryphon-agent service install` makes C:\ProgramData\Gryphon
 // with permissions that pass.
 
 // The rights that let a trustee change what runs: write or append the file (or

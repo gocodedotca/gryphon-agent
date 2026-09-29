@@ -41,15 +41,15 @@ minute from one address, that address gets 429 until the minute passes.
 Go (the version in `go.mod`) and, optionally, [Task](https://taskfile.dev).
 
 ```sh
-task build-client                         # linux/amd64 static binary at tmp/gowatcher-client
+task build-client                         # linux/amd64 static binary at tmp/gryphon-agent
 task build-client ARCH=arm64
 task build-client OS=darwin ARCH=arm64    # headless, for a Mac that is a server
-task build-client OS=windows              # tmp/gowatcher-client.exe, for Windows on x64 (ARCH=arm64 for Arm)
+task build-client OS=windows              # tmp/gryphon-agent.exe, for Windows on x64 (ARCH=arm64 for Arm)
 task build-client-mac                     # "tmp/Gryphon Agent.app", ad-hoc signed: runs on this machine only
 task test
 ```
 
-Without Task: `CGO_ENABLED=0 go build -o gowatcher-client ./cmd/client`.
+Without Task: `CGO_ENABLED=0 go build -o gryphon-agent ./cmd/client`.
 
 ## Run
 
@@ -71,8 +71,8 @@ root.
 By hand:
 
 ```sh
-./gowatcher-client -genkey                  # prints a new key; keep it
-GWC_KEY=<that key> ./gowatcher-client -port 127.0.0.1:6001
+./gryphon-agent -genkey                  # prints a new key; keep it
+GWC_KEY=<that key> ./gryphon-agent -port 127.0.0.1:6001
 ```
 
 Settings are defaults, then `GWC_*` environment variables, then flags. Every
@@ -233,20 +233,20 @@ differences listed below.
 
 ### Install
 
-Download `gowatcher-client_<version>_windows_amd64.zip` (or `_arm64`) and
+Download `gryphon-agent_<version>_windows_amd64.zip` (or `_arm64`) and
 `SHA256SUMS` from the release, and check the one against the other in
 PowerShell:
 
 ```powershell
-(Get-FileHash .\gowatcher-client_<version>_windows_amd64.zip).Hash.ToLower()
+(Get-FileHash .\gryphon-agent_<version>_windows_amd64.zip).Hash.ToLower()
 Select-String "windows_amd64.zip" .\SHA256SUMS      # the two must match
-Expand-Archive .\gowatcher-client_<version>_windows_amd64.zip -DestinationPath .\gryphon-agent
+Expand-Archive .\gryphon-agent_<version>_windows_amd64.zip -DestinationPath .\gryphon-agent
 ```
 
 Then, from PowerShell opened with **Run as administrator**:
 
 ```powershell
-.\gryphon-agent\gowatcher-client.exe service install
+.\gryphon-agent\gryphon-agent.exe service install
 Get-Content C:\ProgramData\Gryphon\agent_key          # paste into the host in Gryphon
 Start-Service GryphonAgent
 ```
@@ -299,7 +299,7 @@ the port for the program only, and only as far as the proxy:
 
 ```powershell
 New-NetFirewallRule -DisplayName "Gryphon Agent" -Direction Inbound -Action Allow `
-  -Program "C:\Program Files\Gryphon Agent\gowatcher-client.exe" -Protocol TCP -LocalPort 6001 `
+  -Program "C:\Program Files\Gryphon Agent\gryphon-agent.exe" -Protocol TCP -LocalPort 6001 `
   -RemoteAddress <the proxy's address>
 ```
 
@@ -361,7 +361,7 @@ elevated PowerShell. It stops the service, replaces the program, and starts it
 again, keeping the key and `agent.env`.
 
 ```powershell
-& "C:\Program Files\Gryphon Agent\gowatcher-client.exe" service uninstall
+& "C:\Program Files\Gryphon Agent\gryphon-agent.exe" service uninstall
 ```
 
 removes the service and its event log source. It keeps
@@ -374,8 +374,8 @@ The program also runs in a console, configured like on Linux, for trying it
 out:
 
 ```powershell
-$env:GWC_KEY = (.\gowatcher-client.exe -genkey)
-.\gowatcher-client.exe -port 127.0.0.1:6001
+$env:GWC_KEY = (.\gryphon-agent.exe -genkey)
+.\gryphon-agent.exe -port 127.0.0.1:6001
 ```
 
 Stop it with Ctrl+C.

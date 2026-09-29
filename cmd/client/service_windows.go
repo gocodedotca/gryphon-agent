@@ -2,7 +2,7 @@ package main
 
 // The agent as a Windows service.
 //
-// `gowatcher-client service install`, from an elevated prompt, does what the
+// `gryphon-agent service install`, from an elevated prompt, does what the
 // Linux package does: puts the program where only administrators can change
 // it (C:\Program Files\Gryphon Agent), makes C:\ProgramData\Gryphon for its
 // key and settings, readable by administrators and the service alone, makes an
@@ -44,7 +44,7 @@ const (
 	// serviceDefaultPort is loopback, as the Linux unit's is: the agent
 	// belongs behind a reverse proxy with TLS.
 	serviceDefaultPort = "127.0.0.1:6001"
-	programName        = "gowatcher-client.exe"
+	programName        = "gryphon-agent.exe"
 )
 
 // dataDir is C:\ProgramData\Gryphon, or wherever ProgramData is.
@@ -171,10 +171,10 @@ func (w *eventWriter) Write(p []byte) (int, error) {
 	return len(p), err
 }
 
-// serviceCommand is `gowatcher-client service install|uninstall`.
+// serviceCommand is `gryphon-agent service install|uninstall`.
 func serviceCommand(args []string) int {
 	if len(args) != 1 {
-		fmt.Fprintln(os.Stderr, "usage: gowatcher-client service install|uninstall")
+		fmt.Fprintln(os.Stderr, "usage: gryphon-agent service install|uninstall")
 		return 2
 	}
 	var err error
@@ -184,7 +184,7 @@ func serviceCommand(args []string) int {
 	case "uninstall":
 		err = uninstallService()
 	default:
-		fmt.Fprintln(os.Stderr, "usage: gowatcher-client service install|uninstall")
+		fmt.Fprintln(os.Stderr, "usage: gryphon-agent service install|uninstall")
 		return 2
 	}
 	if err != nil {

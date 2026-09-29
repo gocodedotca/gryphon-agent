@@ -33,7 +33,7 @@ if [ -z "$VERSION" ]; then
 	[ -n "$VERSION" ] || fail "cannot find the latest release"
 fi
 NUMBER="${VERSION#v}"
-ARCHIVE="gowatcher-client_${NUMBER}_linux_${ARCH}.tar.gz"
+ARCHIVE="gryphon-agent_${NUMBER}_linux_${ARCH}.tar.gz"
 BASE="https://github.com/$REPO/releases/download/$VERSION"
 
 WORK=$(mktemp -d)
@@ -47,10 +47,10 @@ grep " $ARCHIVE\$" SHA256SUMS > expected || fail "$ARCHIVE is not in SHA256SUMS"
 sha256sum -c expected >/dev/null || fail "checksum mismatch: not installing"
 tar -xzf "$ARCHIVE"
 
-install -m 0755 gowatcher-client /usr/bin/gowatcher-client
+install -m 0755 gryphon-agent /usr/bin/gryphon-agent
 install -m 0644 deploy/agent/gryphon-agent.service /etc/systemd/system/gryphon-agent.service
 install -d -m 0755 /etc/gryphon
 [ -e /etc/gryphon/agent.env ] || install -m 0644 deploy/agent/agent.env /etc/gryphon/agent.env
 sh deploy/agent/postinstall.sh
 
-echo "Installed $(/usr/bin/gowatcher-client -version 2>/dev/null || echo "$VERSION")."
+echo "Installed $(/usr/bin/gryphon-agent -version 2>/dev/null || echo "$VERSION")."
