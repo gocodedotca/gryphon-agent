@@ -39,6 +39,18 @@ type config struct {
 // the agent can be handed a Docker or Kubernetes secret — both deliver those as
 // files, never as environment variables.
 func loadConfig(args []string, getenv func(string) string) (config, error) {
+	// GWC_KEY_FILE=- is the key on standard input, which is how the systemd
+	// unit hands it over: systemd opens /etc/gryphon/agent_key as root and
+	// passes it in, so the agent's own user -- and every script it runs as
+	// that user -- has no path to the file. Read here, once, and then
+	// replaced with the key itself for the resolver below.
+	if getenv("GWC_KEY_FILE") == keyFromStdin {
+		key, err := readKeyFrom(keyStdin)
+		if err != nil {
+			return config{}, fmt.Errorf("GWC_KEY_FILE=-: reading the key from standard input: %w", err)
+		}
+		getenv = withKey(getenv, key)
+	}
 	env := envconf.NewResolver("GWC_", getenv)
 	envOr := func(name, def string) string {
 		if v, ok := env.Lookup(name); ok && v != "" {
@@ -125,7 +137,49 @@ func loadConfig(args []string, getenv func(string) string) (config, error) {
 	return c, nil
 }
 
+// keyFromStdin is the GWC_KEY_FILE value that means standard input.
+const keyFromStdin = "-"
+
+// keyStdin is where GWC_KEY_FILE=- reads from; a variable so a test can hand
+// it a key.
+var keyStdin io.Reader = os.Stdin
+
+// readKeyFrom reads a key from r: the first line, trimmed, and no more than a
+// key could be, so a mistaken pipe cannot make the agent read without end.
+func readKeyFrom(r io.Reader) (string, error) {
+	b, err := io.ReadAll(io.LimitReader(r, maxKeyInput))
+	if err != nil {
+		return "", err
+	}
+	line, _, _ := strings.Cut(string(b), "\n")
+	return strings.TrimSpace(line), nil
+}
+
+// maxKeyInput bounds what readKeyFrom reads: a key of the longest length the
+// agent accepts, with room for a line ending.
+const maxKeyInput = 4096
+
+// withKey is getenv with the key read from standard input standing in for
+// GWC_KEY, and GWC_KEY_FILE gone so the resolver does not try to open "-".
+func withKey(getenv func(string) string, key string) func(string) string {
+	return func(name string) string {
+		switch name {
+		case "GWC_KEY":
+			return key
+		case "GWC_KEY_FILE":
+			return ""
+		}
+		return getenv(name)
+	}
+}
+
 func main() {
+	// Before anything else, and before any script can run: a process its own
+	// user cannot inspect. See harden_linux.go.
+	if err := hardenProcess(); err != nil {
+		fmt.Fprintln(os.Stderr, "cannot protect the agent's memory from its scripts:", err)
+		os.Exit(1)
+	}
 	// "service install" and "service uninstall" manage the Windows service;
 	// see service_windows.go.
 	if len(os.Args) > 1 && os.Args[1] == "service" {
@@ -141,6 +195,14 @@ func main() {
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
+	}
+	// The key has been read; the file it came from is closed, so nothing the
+	// agent starts later could find it through this process.
+	if os.Getenv("GWC_KEY_FILE") == keyFromStdin {
+		if err := releaseStdin(); err != nil {
+			fmt.Fprintln(os.Stderr, "closing standard input:", err)
+			os.Exit(1)
+		}
 	}
 
 	if cfg.showVersion {

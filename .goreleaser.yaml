@@ -77,7 +77,9 @@ nfpms:
         dst: /etc/gryphon/agent.env
         type: config|noreplace
         file_info:
-          mode: 0644
+          # Root's only: it can hold GWC_KEY_PREVIOUS while a key is rotated,
+          # and only systemd, as root, reads it.
+          mode: 0600
       - src: deploy/agent/Caddyfile
         dst: /usr/share/doc/gryphon-agent/Caddyfile
       - src: deploy/agent/docker-socket-proxy.yml
