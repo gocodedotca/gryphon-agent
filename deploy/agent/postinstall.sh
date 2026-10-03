@@ -12,6 +12,11 @@ if [ ! -s /etc/gryphon/agent_key ]; then
 	echo "  Paste it into the host's Agent Access Key in Gryphon, then:"
 	echo "  systemctl enable --now gryphon-agent"
 fi
+# agent.env can hold GWC_KEY_PREVIOUS while a key is rotated, and only systemd,
+# as root, reads it. Earlier releases installed it readable by every user.
+if [ -e /etc/gryphon/agent.env ]; then
+	chmod go-rwx /etc/gryphon/agent.env
+fi
 # Only where systemd is running: not in a container or a chroot build.
 if [ -d /run/systemd/system ]; then
 	systemctl daemon-reload || true

@@ -150,3 +150,30 @@ func TestClientWatchDirs(t *testing.T) {
 		t.Errorf("a watched folder that does not exist: %v; want a refusal naming GWC_WATCH_DIRS", err)
 	}
 }
+
+// GWC_KEY_FILE=- is the key on standard input, as the systemd unit hands it
+// over: only the first line counts, and it wins over GWC_KEY as any _FILE
+// twin does.
+func TestClientKeyFromStandardInput(t *testing.T) {
+	old := keyStdin
+	t.Cleanup(func() { keyStdin = old })
+
+	env := map[string]string{"GWC_KEY_FILE": "-", "GWC_KEY": "the-variable-is-not-the-key-0123456789"}
+	getenv := func(k string) string { return env[k] }
+
+	keyStdin = strings.NewReader(testKey + "\nanything after the first line\n")
+	cfg, err := loadConfig(nil, getenv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.agent.Key != testKey {
+		t.Errorf("key = %q, want the first line of standard input", cfg.agent.Key)
+	}
+
+	// Nothing on standard input is no key, and the agent will not start
+	// without one.
+	keyStdin = strings.NewReader("")
+	if _, err := loadConfig(nil, getenv); err == nil {
+		t.Error("an empty standard input was accepted as a key")
+	}
+}

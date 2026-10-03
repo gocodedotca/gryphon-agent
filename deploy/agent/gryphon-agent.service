@@ -5,8 +5,10 @@
 # beside this file) and give Gryphon the https:// URL.
 #
 # Settings go in /etc/gryphon/agent.env (GWC_* variables; see the readme). The
-# access key is /etc/gryphon/agent_key, readable by root only; systemd hands a
-# copy to the service, which never sees the original.
+# access key is /etc/gryphon/agent_key, readable by root only. systemd opens it
+# and hands it to the agent on standard input, which the agent reads once and
+# closes: the agent's user has no path to the file, so neither do the scripts
+# it runs as that user.
 [Unit]
 Description=Gryphon client agent
 Documentation=https://github.com/gocodedotca/gryphon-agent#readme
@@ -17,8 +19,10 @@ Wants=network-online.target
 ExecStart=/usr/bin/gryphon-agent
 Environment=GWC_PORT=127.0.0.1:6001
 EnvironmentFile=-/etc/gryphon/agent.env
-LoadCredential=agent_key:/etc/gryphon/agent_key
-Environment=GWC_KEY_FILE=%d/agent_key
+StandardInput=file:/etc/gryphon/agent_key
+StandardOutput=journal
+StandardError=journal
+Environment=GWC_KEY_FILE=-
 Restart=on-failure
 RestartSec=5
 

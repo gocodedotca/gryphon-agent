@@ -50,7 +50,7 @@ tar -xzf "$ARCHIVE"
 install -m 0755 gryphon-agent /usr/bin/gryphon-agent
 install -m 0644 deploy/agent/gryphon-agent.service /etc/systemd/system/gryphon-agent.service
 install -d -m 0755 /etc/gryphon
-[ -e /etc/gryphon/agent.env ] || install -m 0644 deploy/agent/agent.env /etc/gryphon/agent.env
+[ -e /etc/gryphon/agent.env ] || install -m 0600 deploy/agent/agent.env /etc/gryphon/agent.env
 sh deploy/agent/postinstall.sh
 
 echo "Installed $(/usr/bin/gryphon-agent -version 2>/dev/null || echo "$VERSION")."

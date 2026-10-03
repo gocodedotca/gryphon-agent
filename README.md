@@ -78,7 +78,9 @@ GWC_KEY=<that key> ./gryphon-agent -port 127.0.0.1:6001
 Settings are defaults, then `GWC_*` environment variables, then flags. Every
 variable also has a `_FILE` twin naming a file to read the value from
 (`GWC_KEY_FILE=/run/secrets/gryphon_agent_key`), for secrets mounted by an
-orchestrator.
+orchestrator. `GWC_KEY_FILE=-` reads the key from standard input, once, at
+startup; the systemd unit uses it so that the agent's own user never has a path
+to the key file (see [The systemd unit](#the-systemd-unit)).
 
 | Environment variable | Flag           | Default   | Purpose |
 |----------------------|----------------|-----------|---------|
@@ -143,7 +145,15 @@ refuses anything but a regular executable file, a script every user can write
 to, a script owned by anyone but root or the agent's own user, and a
 group-writable script whose group the agent is not in. The directory is held to
 the same rules. Scripts run as the agent's user, with the agent's environment
-less its own `GWC_*` settings, at most four at a time. A plugin that needs
+less its own `GWC_*` settings, at most four at a time.
+
+A script cannot read the agent's key on Linux. The agent marks itself not
+dumpable as it starts, so a process of the same user -- a script, or anything a
+script runs -- cannot read its memory, environment or open files through
+`/proc` or ptrace, and under the systemd unit the key file is root's. On
+**Windows** that is not so: a script runs as the service's account, which can
+read `agent_key` and `agent.env`, so put only scripts you trust in the scripts
+folder. On macOS the agent is your own app, running your own scripts as you. A plugin that needs
 arguments is a two-line wrapper:
 
 ```sh
@@ -184,9 +194,11 @@ node's Engine.
 ## The systemd unit
 
 `deploy/agent/gryphon-agent.service` runs the agent as a throwaway user with no
-capabilities, a read-only system and no new privileges, hands it the key from
-`/etc/gryphon/agent_key` through systemd credentials, and reads
-`/etc/gryphon/agent.env`. Updates replace the unit, so change it with a drop-in
+capabilities, a read-only system and no new privileges, and reads
+`/etc/gryphon/agent.env`. The key in `/etc/gryphon/agent_key` stays readable by
+root only: systemd opens it and passes it to the agent on standard input, which
+the agent reads once and closes. `agent.env` is root's only too, since it can
+hold `GWC_KEY_PREVIOUS` during a rotation and only systemd reads it. Updates replace the unit, so change it with a drop-in
 (`sudo systemctl edit gryphon-agent`):
 
 ```ini
