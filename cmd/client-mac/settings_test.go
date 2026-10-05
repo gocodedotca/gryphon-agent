@@ -3,6 +3,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -10,7 +11,7 @@ import (
 	"testing"
 )
 
-// testKey is a well-formed access key.
+// testKey is a well-formed token.
 const testKey = "test-key-0123456789abcdefghijklmnopqrstuvwxyz"
 
 // No file is the defaults.
@@ -42,7 +43,7 @@ func TestSettingsMalformedFileIsAnError(t *testing.T) {
 // The switch is remembered without disturbing the other settings.
 func TestSetEnabledKeepsOtherSettings(t *testing.T) {
 	f := settingsFile{path: filepath.Join(t.TempDir(), "config.json")}
-	if err := f.save(settings{Port: ":7001", AccessKey: testKey, Enabled: true}); err != nil {
+	if err := f.save(settings{Server: "https://gryphon.example.test", Token: testKey, Enabled: true}); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.setEnabled(false); err != nil {
@@ -55,7 +56,7 @@ func TestSetEnabledKeepsOtherSettings(t *testing.T) {
 	if s.Enabled {
 		t.Error("still enabled")
 	}
-	if s.Port != ":7001" || s.AccessKey != testKey {
+	if s.Server != "https://gryphon.example.test" || s.Token != testKey {
 		t.Errorf("other settings disturbed: %+v", s)
 	}
 }
@@ -65,91 +66,71 @@ func TestEnsureWritesDefaultsOnce(t *testing.T) {
 	if err := f.ensure(); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(f.path, []byte(`{"port":":9"}`), 0o644); err != nil {
+	if err := os.WriteFile(f.path, []byte(`{"server":"https://nine.example.test"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.ensure(); err != nil {
 		t.Fatal(err)
 	}
 	b, _ := os.ReadFile(f.path)
-	if !strings.Contains(string(b), `":9"`) {
+	if !strings.Contains(string(b), `nine.example.test`) {
 		t.Error("ensure overwrote an existing file")
 	}
 }
 
 func TestSettingsToAgentConfig(t *testing.T) {
-	cfg, err := settings{Port: "6002", AccessKey: " " + testKey + " "}.agentConfig()
+	cfg, err := settings{Token: " " + testKey + " "}.agentConfig()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Addr != "6002" || cfg.Key != testKey {
+	if cfg.Key != testKey || cfg.Server != "" {
 		t.Errorf("cfg = %+v", cfg)
 	}
-	for _, key := range []string{"", "hunter2"} {
-		if _, err := (settings{AccessKey: key}).agentConfig(); err == nil {
-			t.Errorf("access key %q accepted", key)
-		}
+	if _, err := (settings{}).agentConfig(); !errors.Is(err, errNoToken) {
+		t.Errorf("no token: %v; want errNoToken, which says to enter one", err)
+	}
+	if _, err := (settings{Token: "hunter2"}).agentConfig(); err == nil {
+		t.Error("a malformed token was accepted")
+	}
+	if _, err := (settings{Token: testKey, Server: "http://localhost:4000"}).agentConfig(); err == nil {
+		t.Error("an http:// server was accepted without being allowed")
+	}
+	if _, err := (settings{Token: testKey, Server: "http://localhost:4000", AllowInsecureServer: true}).agentConfig(); err != nil {
+		t.Errorf("an allowed http:// server: %v", err)
 	}
 }
 
-// The first time a key is needed one is made and kept; after that it is the
-// same key, because it has been pasted into Gryphon.
-func TestEnsureKeyGeneratesOnceAndKeepsIt(t *testing.T) {
+// A token entered is saved, readable by its owner only, and switches the
+// agent on; nothing else in the file changes.
+func TestSetToken(t *testing.T) {
 	f := settingsFile{path: filepath.Join(t.TempDir(), "config.json")}
-
-	first, minted, err := f.ensureKey()
+	if err := f.save(settings{Server: "https://gryphon.example.test", ScriptsDir: "/opt/scripts"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.setToken(" " + testKey + "\n"); err != nil {
+		t.Fatal(err)
+	}
+	s, err := f.load()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !minted {
-		t.Error("a key was made but ensureKey did not say so")
+	if s.Token != testKey || !s.Enabled || s.Server != "https://gryphon.example.test" || s.ScriptsDir != "/opt/scripts" {
+		t.Errorf("after setToken: %+v", s)
 	}
-	if _, err := first.agentConfig(); err != nil {
-		t.Fatalf("the generated key is not usable: %v", err)
-	}
-	again, minted, err := f.ensureKey()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if minted {
-		t.Error("ensureKey said it made a key when it kept the saved one")
-	}
-	if again.AccessKey != first.AccessKey {
-		t.Error("a second ensureKey replaced the key")
-	}
-
-	info, err := os.Stat(f.path)
-	if err != nil {
-		t.Fatal(err)
-	}
+	info, _ := os.Stat(f.path)
 	if mode := info.Mode().Perm(); mode != 0o600 {
-		t.Errorf("settings file mode = %o, want 600: it holds the key", mode)
+		t.Errorf("mode = %o, want 600: it holds the token", mode)
 	}
 }
 
-// A key the user typed stays, even an unusable one: replacing it would break
-// the host they pasted it into, silently.
-func TestEnsureKeyKeepsATypedKey(t *testing.T) {
-	f := settingsFile{path: filepath.Join(t.TempDir(), "config.json")}
-	if err := f.save(settings{Port: ":6001", AccessKey: "hunter2"}); err != nil {
-		t.Fatal(err)
-	}
-	s, _, err := f.ensureKey()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if s.AccessKey != "hunter2" {
-		t.Errorf("a typed key was replaced with %q", s.AccessKey)
-	}
-}
-
-// A file written before the key existed was world-readable; saving tightens it.
+// A file written before a secret was in it was world-readable; saving
+// tightens it.
 func TestSaveTightensAnExistingFile(t *testing.T) {
 	f := settingsFile{path: filepath.Join(t.TempDir(), "config.json")}
-	if err := os.WriteFile(f.path, []byte(`{"port":":6001"}`), 0o644); err != nil {
+	if err := os.WriteFile(f.path, []byte(`{"enabled":true}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := f.ensureKey(); err != nil {
+	if err := f.setToken(testKey); err != nil {
 		t.Fatal(err)
 	}
 	info, _ := os.Stat(f.path)
@@ -180,14 +161,14 @@ func TestLoginItemPlist(t *testing.T) {
 func TestSaveLeavesNoTemporaryFile(t *testing.T) {
 	dir := t.TempDir()
 	f := settingsFile{path: filepath.Join(dir, "config.json")}
-	if err := f.save(settings{Port: ":6001", AccessKey: "hunter2"}); err != nil {
+	if err := f.save(settings{Token: "hunter2"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(f.path + ".tmp"); !os.IsNotExist(err) {
 		t.Errorf("the temporary file was left behind: %v", err)
 	}
 	s, err := f.load()
-	if err != nil || s.AccessKey != "hunter2" {
+	if err != nil || s.Token != "hunter2" {
 		t.Errorf("load after save = %+v, %v", s, err)
 	}
 }

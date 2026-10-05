@@ -17,14 +17,18 @@ import (
 // config.json. It is what the Linux agent takes from its flags and
 // environment, minus the log format, plus the position of the switch.
 //
-// The file holds the access key, so it is written readable by its owner only.
+// The file holds the token, so it is written readable by its owner only.
 type settings struct {
-	// Port is the listen address: ":6001" or "6001", or a full host:port.
-	Port string `json:"port"`
-	// AccessKey is the pre-shared key Gryphon must present. The app generates
-	// one the first time it needs one; Copy Access Key puts it on the
-	// clipboard for pasting into the host in Gryphon.
-	AccessKey string `json:"access_key"`
+	// Token is what the agent connects to Gryphon with, issued on the
+	// host's page there and given to the app with Enter Token….
+	Token string `json:"token"`
+	// Server is the Gryphon to connect to, when it is not the default. There
+	// is no menu item for it: a customer never changes it, and a developer
+	// or a self-hosted installation edits this file.
+	Server string `json:"server,omitempty"`
+	// AllowInsecureServer lets Server be http://, for a server on this Mac
+	// or an installation reached only across its own network.
+	AllowInsecureServer bool `json:"allow_insecure_server,omitempty"`
 	// Enabled is where the switch was left; the app comes back the same way.
 	Enabled bool `json:"enabled"`
 	// ScriptsDir is the directory script checks run executables from, as
@@ -44,26 +48,30 @@ type settings struct {
 	AllowPublicTargets bool `json:"allow_public_targets,omitempty"`
 }
 
-// defaultPort is loopback, unlike clientagent.DefaultAddr: a Mac is reached
-// through a tunnel on the same machine, and the app turns itself on at first
-// launch, so every interface would put the agent on the local network before
-// its owner had chosen anything.
-const defaultPort = "127.0.0.1:6001"
-
 func defaultSettings() settings {
-	return settings{Port: defaultPort, Enabled: true}
+	return settings{Enabled: true}
 }
+
+// errNoToken is a settings file with no token in it yet.
+var errNoToken = errors.New("no token yet: choose Enter Token… and paste the token from this host's page in Gryphon")
 
 func (s settings) agentConfig() (clientagent.Config, error) {
 	cfg := clientagent.Config{
-		Addr:               s.Port,
-		Key:                strings.TrimSpace(s.AccessKey),
-		ScriptsDir:         strings.TrimSpace(s.ScriptsDir),
-		WatchDirs:          s.WatchDirs,
-		AllowPublicTargets: s.AllowPublicTargets,
+		Key:                 strings.TrimSpace(s.Token),
+		Server:              strings.TrimSpace(s.Server),
+		AllowInsecureServer: s.AllowInsecureServer,
+		ScriptsDir:          strings.TrimSpace(s.ScriptsDir),
+		WatchDirs:           s.WatchDirs,
+		AllowPublicTargets:  s.AllowPublicTargets,
+	}
+	if cfg.Key == "" {
+		return clientagent.Config{}, errNoToken
 	}
 	if err := clientagent.ValidateKey(cfg.Key); err != nil {
-		return clientagent.Config{}, fmt.Errorf("access_key: %w", err)
+		return clientagent.Config{}, fmt.Errorf("token: %w", err)
+	}
+	if _, err := clientagent.ConnectURL(cfg.Server, cfg.AllowInsecureServer); err != nil {
+		return clientagent.Config{}, err
 	}
 	if cfg.ScriptsDir != "" {
 		if err := clientagent.ValidateScriptsDir(cfg.ScriptsDir); err != nil {
@@ -91,7 +99,7 @@ func defaultSettingsFile() settingsFile {
 
 // load reads the file. A missing file is the defaults, not an error. A
 // malformed one is an error, because starting on the defaults would run the
-// agent differently from how the user asked -- and would mean a new key.
+// agent differently from how the user asked -- and without its token.
 func (f settingsFile) load() (settings, error) {
 	s := defaultSettings()
 	b, err := os.ReadFile(f.path)
@@ -117,8 +125,7 @@ func (f settingsFile) save(s settings) error {
 	}
 	// Written beside the file and renamed over it, so a crash or a full disk
 	// mid-write leaves the old settings rather than half of the new ones --
-	// and half a settings file is a file with no key, which would mint a
-	// new one and quietly stop matching the host in Gryphon.
+	// and half a settings file is a file with no token.
 	tmp := f.path + ".tmp"
 	if err := os.WriteFile(tmp, append(b, '\n'), 0o600); err != nil {
 		return err
@@ -127,41 +134,29 @@ func (f settingsFile) save(s settings) error {
 		_ = os.Remove(tmp)
 		return err
 	}
-	// A file from before the key was in it was written world-readable.
+	// A file from before a secret was in it was written world-readable.
 	return os.Chmod(f.path, 0o600)
 }
 
-// ensureKey loads the settings, generating and saving an access key if they
-// have none, and reports whether it did. A key the user typed is kept as it
-// is, even a bad one: the agent refuses to start on it and says why, which is
-// better than quietly replacing a key they have already pasted into Gryphon.
-//
-// minted matters to the caller because a new key is not the one Gryphon
-// holds: the host there refuses every check until it is pasted in again.
-func (f settingsFile) ensureKey() (s settings, minted bool, err error) {
-	s, err = f.load()
-	if err != nil {
-		return s, false, err
-	}
-	if strings.TrimSpace(s.AccessKey) != "" {
-		return s, false, nil
-	}
-	key, err := clientagent.GenerateKey()
-	if err != nil {
-		return s, false, err
-	}
-	s.AccessKey = key
-	return s, true, f.save(s)
-}
-
-// ensure writes the defaults, with a new access key, if there is no file yet,
-// so that Edit Settings… opens something with the keys already in it.
+// ensure writes the defaults if there is no file yet, so that Edit
+// Settings… opens something with the keys already in it.
 func (f settingsFile) ensure() error {
 	if _, err := os.Stat(f.path); err == nil {
 		return nil
 	}
-	_, _, err := f.ensureKey()
-	return err
+	return f.save(defaultSettings())
+}
+
+// setToken records a token, keeping the other settings, and switches the
+// agent on: a token is given in order to connect.
+func (f settingsFile) setToken(token string) error {
+	s, err := f.load()
+	if err != nil {
+		return err
+	}
+	s.Token = strings.TrimSpace(token)
+	s.Enabled = true
+	return f.save(s)
 }
 
 // setEnabled records the switch without touching the other settings, and

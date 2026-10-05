@@ -5,16 +5,16 @@ package main
 // `gryphon-agent service install`, from an elevated prompt, does what the
 // Linux package does: puts the program where only administrators can change
 // it (C:\Program Files\Gryphon Agent), makes C:\ProgramData\Gryphon for its
-// key and settings, readable by administrators and the service alone, makes an
-// access key if there is none, and registers the service -- without starting
-// it, so it does not listen before the host in Gryphon has the key. Run again
-// from a newer build it is the update: it stops the service, replaces the
-// program and starts it again if it was running.
+// token and settings, readable by administrators and the service alone, and
+// registers the service -- without starting it, since it has no token yet.
+// `gryphon-agent enrol` then takes the token and starts it (enrol_windows.go).
+// Run again from a newer build, install is the update: it stops the service,
+// replaces the program and starts it again if it was running.
 //
 // The service runs as the virtual account NT SERVICE\GryphonAgent: no
 // password, no rights beyond an ordinary user's, the Windows counterpart of the
 // systemd unit's DynamicUser. Its settings are C:\ProgramData\Gryphon\agent.env,
-// the same GWC_* variables as on Linux, and its key agent_key beside it. It
+// the same GWC_* variables as on Linux, and its token agent_key beside it. It
 // logs to the Application event log, as source GryphonAgent.
 
 import (
@@ -32,7 +32,6 @@ import (
 	"golang.org/x/sys/windows/svc/eventlog"
 	"golang.org/x/sys/windows/svc/mgr"
 
-	"github.com/gocodedotca/gryphon-agent/pkg/clientagent"
 	"github.com/gocodedotca/gryphon-agent/pkg/envconf"
 )
 
@@ -41,9 +40,6 @@ const (
 	serviceDisplayName = "Gryphon Agent"
 	serviceAccount     = `NT SERVICE\` + serviceName
 	serviceDescription = "Measures this machine for the Gryphon monitoring service."
-	// serviceDefaultPort is loopback, as the Linux unit's is: the agent
-	// belongs behind a reverse proxy with TLS.
-	serviceDefaultPort = "127.0.0.1:6001"
 	programName        = "gryphon-agent.exe"
 )
 
@@ -71,8 +67,7 @@ func isService() bool {
 }
 
 // serviceGetenv is the environment the service reads its settings from: its
-// own environment first, then agent.env, then the service's defaults -- the
-// key file beside agent.env, and loopback.
+// own environment first, then agent.env, then the token file beside it.
 func serviceGetenv() (func(string) string, error) {
 	dir := dataDir()
 	vars, err := envconf.ParseEnvFile(filepath.Join(dir, "agent.env"))
@@ -84,15 +79,10 @@ func serviceGetenv() (func(string) string, error) {
 		if v := getenv(name); v != "" {
 			return v
 		}
-		switch name {
-		case "GWC_PORT":
-			return serviceDefaultPort
-		case "GWC_KEY_FILE":
-			// Only when no key is set some other way: a _FILE twin wins
-			// over its variable, so a default here would hide GWC_KEY.
-			if getenv("GWC_KEY") == "" {
-				return filepath.Join(dir, "agent_key")
-			}
+		// Only when no token is set some other way: a _FILE twin wins over
+		// its variable, so a default here would hide GWC_KEY.
+		if name == "GWC_KEY_FILE" && getenv("GWC_KEY") == "" {
+			return filepath.Join(dir, "agent_key")
 		}
 		return ""
 	}, nil
@@ -116,7 +106,7 @@ type agentService struct{ out io.Writer }
 func (s *agentService) Execute(_ []string, req <-chan svc.ChangeRequest, status chan<- svc.Status) (bool, uint32) {
 	status <- svc.Status{State: svc.StartPending}
 
-	// A failure before the agent is listening is a service-specific exit
+	// A failure before the agent is running is a service-specific exit
 	// code, which the service manager counts as a failure and, with the
 	// recovery actions install sets, restarts after a pause.
 	fail := func(err error) (bool, uint32) {
@@ -274,19 +264,15 @@ func installService() error {
 		fmt.Println("Updated and restarted the GryphonAgent service.")
 		return nil
 	}
-	dir := dataDir()
 	fmt.Printf(`
-The agent is installed and not yet running.
+The agent is installed and not yet running. Give it the token from the host's
+page in Gryphon, which also starts it:
 
-  1. Paste the access key into the host's Agent Access Key in Gryphon:
-       Get-Content "%s"
-  2. Settings, if any, go in %s
-  3. Start it:
-       Start-Service GryphonAgent
+  & '%s' enrol
 
-It starts by itself at boot from then on, and logs to the Application event log
-as GryphonAgent.
-`, filepath.Join(dir, "agent_key"), filepath.Join(dir, "agent.env"))
+Settings, if any, go in %s. It starts by itself at
+boot from then on, and logs to the Application event log as GryphonAgent.
+`, target, filepath.Join(dataDir(), "agent.env"))
 	return nil
 }
 
@@ -329,7 +315,8 @@ func installProgram() (string, error) {
 // prepareDataDir makes C:\ProgramData\Gryphon readable by SYSTEM,
 // Administrators and the service's account and changeable by the first two
 // only -- not inherited from ProgramData, which lets every user add files --
-// then makes the scripts folder, the key and agent.env if they are missing.
+// then makes the scripts folder and agent.env if they are missing. The token
+// is written there by enrol.
 func prepareDataDir() error {
 	dir := dataDir()
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -371,18 +358,6 @@ func prepareDataDir() error {
 	if err := windows.SetNamedSecurityInfo(scripts, windows.SE_FILE_OBJECT,
 		windows.OWNER_SECURITY_INFORMATION, owner, nil, nil, nil); err != nil {
 		return fmt.Errorf("setting the owner of %s: %w", scripts, err)
-	}
-
-	keyPath := filepath.Join(dir, "agent_key")
-	if b, err := os.ReadFile(keyPath); err != nil || len(bytes.TrimSpace(b)) == 0 {
-		key, err := clientagent.GenerateKey()
-		if err != nil {
-			return err
-		}
-		if err := os.WriteFile(keyPath, []byte(key+"\n"), 0o600); err != nil {
-			return err
-		}
-		fmt.Println("Made an access key in " + keyPath + ".")
 	}
 
 	envPath := filepath.Join(dir, "agent.env")
@@ -437,7 +412,7 @@ func uninstallService() error {
 	_ = eventlog.Remove(serviceName)
 	fmt.Printf(`Removed the GryphonAgent service.
 
-Kept, for a reinstall to pick up: the key and settings in %s.
+Kept, for a reinstall to pick up: the token and settings in %s.
 Delete that folder, and %s, to remove the agent entirely.
 `, dataDir(), programDir())
 	return nil
@@ -446,14 +421,11 @@ Delete that folder, and %s, to remove the agent entirely.
 // windowsAgentEnv is the agent.env that install writes when there is none.
 const windowsAgentEnv = `# Settings for the Gryphon Agent service. Restart the service after a change:
 #   Restart-Service GryphonAgent
-# The access key is not here: it is agent_key, beside this file.
+# The token is not here: it is agent_key, beside this file, written by
+#   gryphon-agent.exe enrol
 
-# Where the agent listens. Keep it on loopback, behind a reverse proxy with TLS.
-#GWC_PORT=127.0.0.1:6001
-
-# A key being rotated out, accepted beside the new one until Gryphon has the
-# new key; then remove it and restart.
-#GWC_KEY_PREVIOUS=
+# The Gryphon to connect to, when it is not the default. enrol -server sets it.
+#GWC_SERVER=https://gryphon.example.com
 
 # The Docker Engine, for the container and Swarm checks. The default is Docker's
 # named pipe; the service's account must be in the docker-users group:

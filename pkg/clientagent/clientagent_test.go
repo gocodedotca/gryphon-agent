@@ -50,102 +50,12 @@ func TestValidateKey(t *testing.T) {
 }
 
 func TestDefaults(t *testing.T) {
-	if got := (Config{}).withDefaults().Addr; got != DefaultAddr {
-		t.Errorf("addr = %q, want the default", got)
+	if got := (Config{}).withDefaults().Server; got != DefaultServer {
+		t.Errorf("server = %q, want the default", got)
 	}
-	if got := (Config{Addr: "7001"}).withDefaults().Addr; got != ":7001" {
-		t.Errorf("bare port became %q", got)
-	}
-	if got := (Config{Addr: "127.0.0.1:7001"}).withDefaults().Addr; got != "127.0.0.1:7001" {
-		t.Errorf("host:port became %q", got)
-	}
-	// A key read from a secret file carries its trailing newline.
+	// A token read from a secret file carries its trailing newline.
 	if got := (Config{Key: testKey + "\n"}).withDefaults().Key; got != testKey {
 		t.Errorf("key = %q, want it trimmed", got)
-	}
-}
-
-// There is no running without a key: the agent would otherwise answer the
-// database checks for anyone who can reach the port.
-func TestStartRefusesWithoutAKey(t *testing.T) {
-	for _, key := range []string{"", "short"} {
-		ag := New(Config{Addr: "127.0.0.1:0", Key: key}, nil)
-		if err := ag.Start(); err == nil {
-			_ = ag.Stop(context.Background())
-			t.Errorf("started with key %q", key)
-		}
-		if ag.Running() {
-			t.Errorf("claims to be running with key %q", key)
-		}
-	}
-}
-
-// The on/off switch: an agent starts, answers, stops, and the port is free
-// again at once so it can start again.
-func TestAgentStartsAndStops(t *testing.T) {
-	ag := New(Config{Addr: "127.0.0.1:0", Key: testKey}, nil)
-	if ag.Running() {
-		t.Fatal("running before Start")
-	}
-	if err := ag.Start(); err != nil {
-		t.Fatal(err)
-	}
-	if err := ag.Start(); err != ErrRunning {
-		t.Errorf("second Start = %v, want ErrRunning", err)
-	}
-	addr := ag.Addr()
-	if addr == nil {
-		t.Fatal("no address while running")
-	}
-
-	req, _ := http.NewRequest("GET", "http://"+addr.String()+"/test", nil)
-	req.Header.Set("Authorization", "Bearer "+testKey)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp.Body.Close()
-	if resp.StatusCode != 200 {
-		t.Errorf("status = %d", resp.StatusCode)
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := ag.Stop(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if ag.Running() {
-		t.Error("running after Stop")
-	}
-	if _, err := net.DialTimeout("tcp", addr.String(), 200*time.Millisecond); err == nil {
-		t.Error("port still accepting connections after Stop")
-	}
-	if err := ag.Stop(ctx); err != nil {
-		t.Errorf("Stop when stopped = %v, want nil", err)
-	}
-
-	// Start again on the same port: nothing from the first run is in the way.
-	ag2 := New(Config{Addr: addr.String(), Key: testKey}, nil)
-	if err := ag2.Start(); err != nil {
-		t.Fatalf("restart on the same port: %v", err)
-	}
-	_ = ag2.Stop(ctx)
-}
-
-// A port in use is Start's error, not a log line -- the menu bar app shows it.
-func TestAgentStartReportsPortInUse(t *testing.T) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer ln.Close()
-	ag := New(Config{Addr: ln.Addr().String(), Key: testKey}, nil)
-	if err := ag.Start(); err == nil {
-		_ = ag.Stop(context.Background())
-		t.Fatal("Start on a busy port returned nil")
-	}
-	if ag.Running() {
-		t.Error("claims to be running after a failed Start")
 	}
 }
 
@@ -156,103 +66,7 @@ func (h testHandler) routes() http.Handler { return h.Handler }
 // testApp is the agent's handler with testKey as its access key.
 func testApp(t *testing.T) testHandler {
 	t.Helper()
-	return testHandler{Handler(Config{Key: testKey}, slog.New(slog.NewTextHandler(os.Stderr, nil)))}
-}
-
-// The server's connectivity test is a GET with no body; the old client tried
-// to JSON-parse the empty body and answered "Error parsing json".
-func TestTestEndpointAnswersBodylessGet(t *testing.T) {
-	app := testApp(t)
-
-	req := httptest.NewRequest("GET", "/test", nil)
-	req.Header.Set("Authorization", "Bearer "+testKey)
-	rec := httptest.NewRecorder()
-	app.routes().ServeHTTP(rec, req)
-
-	if rec.Code != 200 {
-		t.Fatalf("status = %d", rec.Code)
-	}
-	var resp agent.Response
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-		t.Fatal(err)
-	}
-	if !resp.OK || resp.Action != "test" {
-		t.Errorf("resp = %+v, want ok test", resp)
-	}
-}
-
-// Every request needs the key, from any address. Loopback in particular gets no
-// pass: behind a reverse proxy on the same machine, every request arrives from
-// loopback.
-func TestAccessKeyEnforced(t *testing.T) {
-	app := testApp(t)
-
-	for name, header := range map[string]string{
-		"no header":           "",
-		"the wrong key":       "Bearer wrong-key-0123456789abcdefghijklmnopqrstuvwxyz",
-		"the key as a prefix": "Bearer " + testKey + "x",
-		"a truncated key":     "Bearer " + testKey[:len(testKey)-1],
-		"another scheme":      "Basic " + testKey,
-		"no scheme":           testKey,
-		"an empty bearer":     "Bearer ",
-	} {
-		t.Run(name, func(t *testing.T) {
-			for _, path := range []string{"/test", "/memory", "/postgres"} {
-				method := "POST"
-				if path == "/test" {
-					method = "GET"
-				}
-				req := httptest.NewRequest(method, path, nil)
-				req.RemoteAddr = "127.0.0.1:9999"
-				if header != "" {
-					req.Header.Set("Authorization", header)
-				}
-				rec := httptest.NewRecorder()
-				app.routes().ServeHTTP(rec, req)
-
-				if rec.Code != http.StatusUnauthorized {
-					t.Fatalf("%s: status = %d, want 401", path, rec.Code)
-				}
-				if got := rec.Header().Get("WWW-Authenticate"); !strings.Contains(got, `realm="gryphon-agent"`) {
-					t.Errorf("%s: WWW-Authenticate = %q, want the agent's realm", path, got)
-				}
-				var resp agent.Response
-				if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-					t.Fatal(err)
-				}
-				if resp.OK || resp.Measurement != nil {
-					t.Errorf("%s: a refused request reported something: %+v", path, resp)
-				}
-			}
-		})
-	}
-
-	t.Run("the scheme is case-insensitive", func(t *testing.T) {
-		req := httptest.NewRequest("GET", "/test", nil)
-		req.Header.Set("Authorization", "bearer "+testKey)
-		rec := httptest.NewRecorder()
-		app.routes().ServeHTTP(rec, req)
-		if rec.Code != http.StatusOK {
-			t.Errorf("status = %d, want 200", rec.Code)
-		}
-	})
-}
-
-// A handler embedded with no key refuses everything, rather than matching an
-// empty key against an empty header.
-func TestHandlerWithoutAKeyRefusesEverything(t *testing.T) {
-	h := Handler(Config{}, nil)
-	for _, header := range []string{"", "Bearer ", "Bearer x"} {
-		req := httptest.NewRequest("GET", "/test", nil)
-		if header != "" {
-			req.Header.Set("Authorization", header)
-		}
-		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, req)
-		if rec.Code != http.StatusUnauthorized {
-			t.Errorf("header %q: status = %d, want 401", header, rec.Code)
-		}
-	}
+	return testHandler{checkHandler(Config{Key: testKey}, slog.New(slog.NewTextHandler(os.Stderr, nil)))}
 }
 
 // A memory check exercised end to end through the handler: the old client's
@@ -373,7 +187,7 @@ func TestPercentageChecksReportPercentages(t *testing.T) {
 // postCheck runs one check through the handler with the given parameters.
 func postCheck(t *testing.T, action, parameters string) agent.Response {
 	t.Helper()
-	body, _ := json.Marshal(agent.Request{Parameters: parameters})
+	body, _ := json.Marshal(map[string]string{"parameters": parameters})
 	req := httptest.NewRequest("POST", "/"+action, bytes.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+testKey)
 	rec := httptest.NewRecorder()
@@ -493,13 +307,6 @@ func TestACheckPastItsDeadlineIsAnsweredUnknown(t *testing.T) {
 	}
 	if resp.NewStatusID != agent.StatusUnknown || !strings.Contains(resp.Status, "did not finish") {
 		t.Errorf("got status %d (%q), want unknown saying it did not finish", resp.NewStatusID, resp.Status)
-	}
-}
-
-// The deadline is only useful if the answer can still be written after it.
-func TestWriteTimeoutLeavesRoomAfterTheCheckDeadline(t *testing.T) {
-	if writeTimeout < agent.CheckDeadline+3*time.Second {
-		t.Errorf("write timeout %s leaves too little after the %s check deadline", writeTimeout, agent.CheckDeadline)
 	}
 }
 

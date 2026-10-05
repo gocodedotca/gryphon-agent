@@ -7,12 +7,12 @@ import (
 	"testing"
 )
 
-// testKey is a well-formed access key.
+// testKey is a well-formed token.
 const testKey = "test-key-0123456789abcdefghijklmnopqrstuvwxyz"
 
 // The agent runs in the same orchestrators the server does, so its own
-// variables have to accept a mounted secret too — and the access key is
-// exactly the sort of thing an operator would rather not have sitting in
+// variables have to accept a mounted secret too — and the token is exactly
+// the sort of thing an operator would rather not have sitting in
 // `docker inspect`.
 func TestClientConfigCanComeFromSecretFiles(t *testing.T) {
 	dir := t.TempDir()
@@ -27,7 +27,7 @@ func TestClientConfigCanComeFromSecretFiles(t *testing.T) {
 	}
 
 	e := map[string]string{
-		"GWC_PORT_FILE":       write("port", ":7002"),
+		"GWC_SERVER_FILE":     write("server", "https://gryphon.example.test"),
 		"GWC_KEY_FILE":        write("key", testKey),
 		"GWC_LOG_FORMAT_FILE": write("log_format", "json"),
 	}
@@ -36,8 +36,8 @@ func TestClientConfigCanComeFromSecretFiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.agent.Addr != ":7002" {
-		t.Errorf("port = %q", cfg.agent.Addr)
+	if cfg.agent.Server != "https://gryphon.example.test" {
+		t.Errorf("server = %q", cfg.agent.Server)
 	}
 	if cfg.logFormat != "json" {
 		t.Errorf("logFormat = %q", cfg.logFormat)
@@ -49,18 +49,18 @@ func TestClientConfigCanComeFromSecretFiles(t *testing.T) {
 
 // A flag still beats a secret file, the same as it beats a variable.
 func TestClientFlagBeatsSecretFile(t *testing.T) {
-	path := t.TempDir() + "/port"
-	if err := os.WriteFile(path, []byte(":7002"), 0o600); err != nil {
+	path := t.TempDir() + "/server"
+	if err := os.WriteFile(path, []byte("https://one.example.test"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
-	cfg, err := loadConfig([]string{"-port", ":7003"},
-		func(k string) string { return map[string]string{"GWC_PORT_FILE": path, "GWC_KEY": testKey}[k] })
+	cfg, err := loadConfig([]string{"-server", "https://two.example.test"},
+		func(k string) string { return map[string]string{"GWC_SERVER_FILE": path, "GWC_KEY": testKey}[k] })
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.agent.Addr != ":7003" {
-		t.Errorf("port = %q, want the flag to win", cfg.agent.Addr)
+	if cfg.agent.Server != "https://two.example.test" {
+		t.Errorf("server = %q, want the flag to win", cfg.agent.Server)
 	}
 }
 
@@ -75,7 +75,7 @@ func TestClientMissingSecretFileIsAnError(t *testing.T) {
 	}
 }
 
-// There is no starting without a key, and the error says how to get one.
+// There is no starting without a token, and the error says how to get one.
 func TestClientRefusesToStartWithoutAKey(t *testing.T) {
 	for name, env := range map[string]map[string]string{
 		"no key":      {},
@@ -86,20 +86,34 @@ func TestClientRefusesToStartWithoutAKey(t *testing.T) {
 			t.Errorf("%s: started", name)
 			continue
 		}
-		if !strings.Contains(err.Error(), "-genkey") {
-			t.Errorf("%s: the error does not say how to make a key: %v", name, err)
+		if !strings.Contains(err.Error(), "gryphon-agent enrol") {
+			t.Errorf("%s: the error does not say how to give it a token: %v", name, err)
 		}
 	}
 }
 
-// -genkey needs no key of its own, which is the point of it.
-func TestClientGenKeyNeedsNoKey(t *testing.T) {
-	cfg, err := loadConfig([]string{"-genkey"}, func(string) string { return "" })
-	if err != nil {
-		t.Fatal(err)
+// The production server is the default, and a plain http:// one is refused
+// unless asked for: the token and every check's settings would cross the
+// network in the clear.
+func TestClientServer(t *testing.T) {
+	env := func(extra map[string]string) func(string) string {
+		return func(k string) string {
+			if k == "GWC_KEY" {
+				return testKey
+			}
+			return extra[k]
+		}
 	}
-	if !cfg.genKey {
-		t.Error("-genkey was not recorded")
+	cfg, err := loadConfig(nil, env(nil))
+	if err != nil || cfg.agent.Server != "https://gryphon.gocode.ca" {
+		t.Errorf("default server = %q, %v", cfg.agent.Server, err)
+	}
+	if _, err := loadConfig(nil, env(map[string]string{"GWC_SERVER": "http://localhost:4000"})); err == nil {
+		t.Error("an http:// server was accepted without being allowed")
+	}
+	cfg, err = loadConfig(nil, env(map[string]string{"GWC_SERVER": "http://localhost:4000", "GWC_ALLOW_INSECURE_SERVER": "true"}))
+	if err != nil || !cfg.agent.AllowInsecureServer {
+		t.Errorf("an allowed http:// server: %+v, %v", cfg.agent, err)
 	}
 }
 

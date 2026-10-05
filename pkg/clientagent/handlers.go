@@ -2,24 +2,18 @@ package clientagent
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
 	"log/slog"
-	"net"
 	"net/http"
 	"sort"
-	"strconv"
 	"time"
 
-	"github.com/go-chi/chi/v5"
 	"github.com/gocodedotca/gryphon-agent/pkg/agent"
-	"github.com/gocodedotca/gryphon-agent/pkg/ratelimit"
 	"github.com/gocodedotca/gryphon-agent/pkg/version"
 )
 
-// handlers is the HTTP side of the agent: the access key and the routes.
+// handlers runs the agent's checks: one per request from Gryphon, each
+// bounded by its deadline and by the cap on checks in flight.
 type handlers struct {
 	cfg     Config
 	log     *slog.Logger
@@ -29,28 +23,6 @@ type handlers struct {
 	net     *netProbe
 	// slots bounds the checks in flight; see Config.MaxConcurrent.
 	slots chan struct{}
-	// denials throttles a caller that keeps presenting a wrong key.
-	denials *ratelimit.Memory
-}
-
-// Wrong keys are counted per caller: past this many in the window, the
-// caller is answered 429 until the window ends. Sixty a minute is more than
-// a misconfigured server with a host full of checks produces -- so the right
-// key, once saved, is not made to wait -- and a guess at a 256-bit key
-// needs so many more that the limit's exact value is beside the point.
-const (
-	denialLimit  = 60
-	denialWindow = time.Minute
-)
-
-// Handler returns the agent's HTTP handler for cfg. Most callers want Agent,
-// which also owns the listener; this is for embedding the agent in another
-// server, and for tests.
-func Handler(cfg Config, log *slog.Logger) http.Handler {
-	if log == nil {
-		log = slog.New(slog.DiscardHandler)
-	}
-	return newHandlers(cfg.withDefaults(), log).routes()
 }
 
 // newHandlers builds the handlers for a configuration that already has its
@@ -64,7 +36,6 @@ func newHandlers(cfg Config, log *slog.Logger) *handlers {
 		files:   newFileWatcher(cfg.WatchDirs),
 		net:     newNetProbe(cfg.reach()),
 		slots:   make(chan struct{}, cfg.MaxConcurrent),
-		denials: ratelimit.New(denialLimit, denialWindow),
 	}
 }
 
@@ -125,97 +96,10 @@ func unknownResult(err error) result {
 	return result{statusID: agent.StatusUnknown, msg: "could not measure: " + err.Error()}
 }
 
-func (app *handlers) routes() http.Handler {
-	mux := chi.NewRouter()
-
-	mux.Use(middlewareRecoverer(app.log))
-
-	// Liveness, with no key: for a systemd watchdog or an orchestrator, which
-	// have none. It says nothing but that the agent is up.
-	mux.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		_, _ = w.Write([]byte("ok\n"))
-	})
-
-	mux.Group(func(mux chi.Router) {
-		mux.Use(app.requireKey)
-		// The server's connectivity test is a GET with no body; checks are
-		// POSTs.
-		mux.Get("/test", app.test)
-		mux.Post("/test", app.test)
-		mux.Post("/{action}", app.check)
-	})
-
-	return mux
-}
-
-// requireKey refuses any request that does not carry the access key, or the
-// previous one during a rotation. The comparison is agent.KeyMatcher's; a
-// handler built with no usable key refuses everything. Start will not run
-// one, but Handler can be embedded directly.
-//
-// A caller that keeps presenting a wrong key is throttled: a misconfigured
-// server sends one wrong key a minute, and a guess needs far more than the
-// limit allows.
-func (app *handlers) requireKey(next http.Handler) http.Handler {
-	matches := agent.KeyMatcher(app.cfg.Key)
-	matchesPrevious := func(string) bool { return false }
-	if app.cfg.PreviousKey != "" {
-		matchesPrevious = agent.KeyMatcher(app.cfg.PreviousKey)
-	}
-
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		caller := callerAddress(r)
-		if !app.denials.Allow(caller) {
-			retry := app.denials.RetryAfter(caller)
-			app.log.Warn("throttled", "remote", r.RemoteAddr, "retry_after", retry)
-			w.Header().Set("Retry-After", strconv.Itoa(int(retry.Seconds())+1))
-			writeJSON(w, http.StatusTooManyRequests, agent.Response{
-				OK: false, Status: "too many wrong access keys; try again later", DateTime: time.Now(),
-			})
-			return
-		}
-		presented, ok := agent.BearerToken(r)
-		if !ok {
-			app.deny(w, r, caller, "no access key presented")
-			return
-		}
-		if !matches(presented) && !matchesPrevious(presented) {
-			app.deny(w, r, caller, "wrong access key")
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
-}
-
-// callerAddress is the address a denial is counted against: the connection's,
-// which behind a reverse proxy on the same machine is loopback for everybody.
-// That is still right: the throttle exists to slow a guess, and a guess
-// through the proxy is slowed with everything else through it.
-func callerAddress(r *http.Request) string {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr
-	}
-	return host
-}
-
-// deny answers 401 with the agent's realm, which is how the server tells a
-// refused key from a 401 that a proxy in front of the agent sent itself.
-func (app *handlers) deny(w http.ResponseWriter, r *http.Request, caller, why string) {
-	app.denials.Fail(caller)
-	app.log.Warn("denied", "remote", r.RemoteAddr, "path", r.URL.Path, "reason", why)
-	w.Header().Set("WWW-Authenticate", `Bearer realm="`+agent.Realm+`"`)
-	writeJSON(w, http.StatusUnauthorized, agent.Response{
-		OK:       false,
-		Status:   "access key missing or wrong",
-		DateTime: time.Now(),
-		Version:  version.Version(),
-	})
-}
-
-func (app *handlers) test(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, agent.Response{
+// testResponse is the answer to a test: the agent is here, this is its build,
+// and these are the checks it runs.
+func (app *handlers) testResponse() agent.Response {
+	return agent.Response{
 		Action:      "test",
 		OK:          true,
 		Status:      "Success",
@@ -223,7 +107,7 @@ func (app *handlers) test(w http.ResponseWriter, r *http.Request) {
 		NewStatusID: agent.StatusHealthy,
 		Version:     version.Version(),
 		Checks:      app.checkNames(),
-	})
+	}
 }
 
 // checkFunc runs one check. ctx carries the check's deadline; a check that
@@ -306,6 +190,16 @@ func runWithDeadline(ctx context.Context, action, params string, fn checkFunc, r
 	done := make(chan result, 1)
 	go func() {
 		defer release()
+		// A panic here is on a goroutine of its own, where nothing above
+		// could recover it: it would end the agent, and every check with it.
+		defer func() {
+			if rec := recover(); rec != nil {
+				done <- result{
+					statusID: agent.StatusUnknown,
+					msg:      fmt.Sprintf("the %s check failed unexpectedly: %v", action, rec),
+				}
+			}
+		}()
 		done <- fn(ctx, params)
 	}()
 
@@ -320,27 +214,19 @@ func runWithDeadline(ctx context.Context, action, params string, fn checkFunc, r
 	}
 }
 
-func (app *handlers) check(w http.ResponseWriter, r *http.Request) {
-	action := chi.URLParam(r, "action")
-
+// run runs the check named action and answers for it, with the code the
+// answer goes back with: 200, or 404 for a check this build does not know.
+// Whatever carries the request -- an HTTP post, or a frame on the connection
+// to Gryphon -- the check is run, bounded and answered here.
+func (app *handlers) run(ctx context.Context, action, params string) (int, agent.Response) {
 	fn, ok := app.lookup(action)
 	if !ok {
 		// Named as such, with the build and what it does run, so the server
 		// can say "update the agent" rather than "404".
-		writeJSON(w, http.StatusNotFound, agent.Response{
+		return http.StatusNotFound, agent.Response{
 			Action: action, OK: false, Status: agent.UnknownCheckStatus, DateTime: time.Now(),
 			Version: version.Version(), Checks: app.checkNames(),
-		})
-		return
-	}
-
-	// An absent body is fine: only some checks carry parameters.
-	var req agent.Request
-	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
-		writeJSON(w, http.StatusBadRequest, agent.Response{
-			Action: action, OK: false, Status: "could not parse request body", DateTime: time.Now(),
-		})
-		return
+		}
 	}
 
 	// A slot, or "busy": past the cap the agent says so rather than starting
@@ -350,16 +236,15 @@ func (app *handlers) check(w http.ResponseWriter, r *http.Request) {
 	select {
 	case app.slots <- struct{}{}:
 	default:
-		writeJSON(w, http.StatusOK, agent.Response{
+		return http.StatusOK, agent.Response{
 			Action: action, OK: false, DateTime: time.Now(), NewStatusID: agent.StatusUnknown,
 			Status:  fmt.Sprintf("the agent is busy: %d checks are already running", app.cfg.MaxConcurrent),
 			Version: version.Version(),
-		})
-		return
+		}
 	}
-	res := runWithDeadline(r.Context(), action, req.Parameters, fn, func() { <-app.slots })
+	res := runWithDeadline(ctx, action, params, fn, func() { <-app.slots })
 
-	writeJSON(w, http.StatusOK, agent.Response{
+	return http.StatusOK, agent.Response{
 		Action: action,
 		// OK says the agent carried the check out, not that the target is
 		// healthy. For a sensor check those are different questions and only
@@ -372,28 +257,5 @@ func (app *handlers) check(w http.ResponseWriter, r *http.Request) {
 		Measurement: res.measurement,
 		RTT:         res.rtt,
 		Version:     version.Version(),
-	})
-}
-
-func writeJSON(w http.ResponseWriter, code int, v agent.Response) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(v)
-}
-
-// middlewareRecoverer keeps one panicking check from taking the agent down.
-func middlewareRecoverer(log interface{ Error(string, ...any) }) func(http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			defer func() {
-				if rec := recover(); rec != nil {
-					log.Error("panic in handler", "path", r.URL.Path, "panic", rec)
-					writeJSON(w, http.StatusInternalServerError, agent.Response{
-						OK: false, Status: "internal error", DateTime: time.Now(),
-					})
-				}
-			}()
-			next.ServeHTTP(w, r)
-		})
 	}
 }

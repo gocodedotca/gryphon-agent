@@ -4,8 +4,9 @@ The agent for Gryphon, a monitoring service. It runs on
 a monitored host and measures what checks from outside cannot see: disk,
 memory, CPU and load, databases and services on the host's own network, Docker
 containers and Swarm services, the age of the files your jobs leave behind,
-and scripts you put there. Gryphon posts to it
-with the host's access key and it answers with a status.
+and scripts you put there. It connects out to Gryphon over HTTPS with a token
+issued for its host, and answers the checks Gryphon sends down that
+connection. Nothing listens on the machine.
 
 This is the agent's source, published so that what runs on your machine can be
 read. It is exported from the repository Gryphon is developed in, so pull
@@ -13,10 +14,10 @@ requests are read but not merged here; open an issue instead.
 
 - `cmd/client` — the agent for Linux and Windows (and for a Mac that is a server)
 - `cmd/client-mac` — the same agent as a macOS menu bar app, **Gryphon Agent**
-- `pkg/clientagent` — the checks and the HTTP service both of them run
+- `pkg/clientagent` — the checks, and the connection to Gryphon, both of them run
 - `pkg/netcheck` — the HTTP, TCP, ping and database handshakes
-- `deploy/agent` — the systemd unit, its settings file, `install.sh`, a
-  Caddyfile and a Docker socket proxy
+- `deploy/agent` — the systemd unit, its settings file, `install.sh` and a
+  Docker socket proxy
 - `build/macos` — how the Mac app is built, signed and notarized
 
 ## What it does and does not do
@@ -26,15 +27,26 @@ machine's, even inside a container. It answers the disk space, memory, CPU,
 load, Postgres, MariaDB/MySQL, Redis, HTTP, HTTPS, ping, TCP, Swarm service,
 Swarm stack, container, container memory and container CPU checks, scripts when
 a scripts directory is set, and file freshness when watched folders are set.
-`GET /test` returns that list.
+It tells Gryphon that list each time it connects.
 
 There are no thresholds in the agent. It measures and reports numbers; what
 counts as a warning or a problem is decided by the server, per check.
 
-Every request needs the access key, as `Authorization: Bearer <key>`, compared
-in constant time; there is no way to run without one. Past 60 wrong keys a
-minute from one address, that address gets 429 until the minute passes.
-`GET /healthz` answers `ok` without a key, for a watchdog or load balancer.
+## How it connects
+
+The agent opens one connection to Gryphon — HTTPS on port 443, kept open as a
+WebSocket — presenting its token, and keeps it open. Gryphon sends each check
+down it and the agent answers on it. If the connection drops, the agent
+reconnects by itself, waiting a little longer each time up to a minute; if
+Gryphon refuses the token, it tries again only every five minutes. Nothing
+listens on the machine, so there is no port to open, no certificate to manage
+and no reverse proxy.
+
+The token is issued by Gryphon, one per host, on the host's page, and shown
+once; Gryphon keeps only its hash. Replacing it disconnects the agent using the
+old one. A machine that cannot reach the internet directly can use a proxy:
+`HTTPS_PROXY` in the agent's environment, as for any program; the proxy must
+allow WebSocket connections.
 
 ## Build
 
@@ -55,67 +67,55 @@ Without Task: `CGO_ENABLED=0 go build -o gryphon-agent ./cmd/client`.
 
 Released builds come as a `.deb`, an `.rpm` and a plain archive for Linux on
 amd64 and arm64, and a `.zip` for Windows ([below](#on-windows)). The packages install the binary, a hardened systemd unit and
-`/etc/gryphon/agent.env`, make an access key in `/etc/gryphon/agent_key`, and
-leave the agent off:
+`/etc/gryphon/agent.env`, and leave the agent off until it has a token. Get one
+from the host's page in Gryphon (**Connect an agent**), then:
 
 ```sh
 sudo apt install ./gryphon-agent_<version>_amd64.deb     # or: sudo dnf install ./gryphon-agent_<version>_amd64.rpm
-sudo cat /etc/gryphon/agent_key                          # paste into the host in Gryphon
-sudo systemctl enable --now gryphon-agent
+sudo gryphon-agent enrol                                 # paste the token; it is checked, saved and the agent started
 ```
 
-`deploy/agent/install.sh` does the same from the release archive, after
-checking it against the release's `SHA256SUMS`. Read it before running it as
-root.
+`enrol` asks for the token without echoing it (or reads the first line of its
+standard input, piped), checks it by connecting to Gryphon once, writes it to
+`/etc/gryphon/agent_key` readable by root only, and enables and starts the
+unit. `-server URL` points the agent at a Gryphon other than the default and
+records it in `agent.env`; `-no-start` saves the token without starting.
 
-By hand:
+`deploy/agent/install.sh` does the same as the packages from the release
+archive, after checking it against the release's `SHA256SUMS`. Read it before
+running it as root.
+
+By hand, with the token in a file only you can read:
 
 ```sh
-./gryphon-agent -genkey                  # prints a new key; keep it
-GWC_KEY=<that key> ./gryphon-agent -port 127.0.0.1:6001
+read -rsp "Token: " TOKEN; echo
+(umask 077; printf '%s\n' "$TOKEN" > agent_key); unset TOKEN
+GWC_KEY_FILE=./agent_key ./gryphon-agent
 ```
 
 Settings are defaults, then `GWC_*` environment variables, then flags. Every
 variable also has a `_FILE` twin naming a file to read the value from
 (`GWC_KEY_FILE=/run/secrets/gryphon_agent_key`), for secrets mounted by an
-orchestrator. `GWC_KEY_FILE=-` reads the key from standard input, once, at
+orchestrator. `GWC_KEY_FILE=-` reads the token from standard input, once, at
 startup; the systemd unit uses it so that the agent's own user never has a path
-to the key file (see [The systemd unit](#the-systemd-unit)).
+to the token file (see [The systemd unit](#the-systemd-unit)).
 
 | Environment variable | Flag           | Default   | Purpose |
 |----------------------|----------------|-----------|---------|
-| `GWC_KEY`            | *(none)*       | *(none)*  | The access key, 32 to 256 printable ASCII characters. Required |
-| `GWC_KEY_PREVIOUS`   | *(none)*       | *(none)*  | A second key accepted while the key is rotated |
-| `GWC_PORT`           | `-port`        | `:6001`   | Address to listen on. The packaged unit sets `127.0.0.1:6001` |
+| `GWC_KEY`            | *(none)*       | *(none)*  | The token from the host's page in Gryphon. Required |
+| `GWC_SERVER`         | `-server`      | `https://gryphon.gocode.ca` | The Gryphon to connect to |
+| `GWC_ALLOW_INSECURE_SERVER` | `-allow-insecure-server` | `false` | Allow an `http://` server: for development, or an installation reached only across its own network |
 | `GWC_LOG_FORMAT`     | `-logformat`   | `text`    | `text` or `json` |
 | `GWC_DOCKER_SOCKET`  | `-docker-socket` | `/var/run/docker.sock` | The Docker Engine, for the container and Swarm checks: a socket path, or `tcp://host:port` for a socket proxy |
 | `GWC_MAX_CONCURRENT` | `-max-concurrent` | `32`     | How many checks may run at once; past it a check answers unknown, "the agent is busy" |
 | `GWC_WATCH_DIRS`     | `-watch-dirs`  | *(none)*  | Folders the file freshness checks may look in, separated as `PATH` is (`:` on Unix, `;` on Windows). Unset, file checks are off |
 | `GWC_SCRIPTS_DIR`    | `-scripts-dir` | *(none)*  | Directory of executables the script checks run by name. Unset, script checks are off |
 | `GWC_ALLOW_PUBLIC_TARGETS` | `-allow-public-targets` | `false` | Let the network and database checks dial the public internet (below) |
-|                      | `-genkey`      |           | Print a new access key and exit |
 |                      | `-version`     |           | Print the build and exit |
 
-The key has no flag on purpose: a command line is visible to every user on the
-machine through `ps`. To change it without a gap, put the new key in `GWC_KEY`
-and the old one in `GWC_KEY_PREVIOUS` until Gryphon has the new one.
-
-## Put it behind TLS
-
-The key travels in a header, so over plain `http://` anyone on the path can
-read it, along with any database connection string a check sends. Bind the
-agent to loopback, terminate TLS in a reverse proxy and give Gryphon the
-`https://` URL. With Caddy (`deploy/agent/Caddyfile`):
-
-```
-agent.example.com {
-	reverse_proxy 127.0.0.1:6001
-}
-```
-
-On a Mac, a tunnel does the same without opening a port: Cloudflare Tunnel
-(`cloudflared tunnel --url http://127.0.0.1:6001`) or Tailscale Funnel
-(`tailscale funnel 6001`).
+The token has no flag on purpose: a command line is visible to every user on
+the machine through `ps`. To change it, replace the token on the host's page and
+run `enrol` again with the new one.
 
 ## Where checks may connect
 
@@ -147,10 +147,10 @@ group-writable script whose group the agent is not in. The directory is held to
 the same rules. Scripts run as the agent's user, with the agent's environment
 less its own `GWC_*` settings, at most four at a time.
 
-A script cannot read the agent's key on Linux. The agent marks itself not
+A script cannot read the agent's token on Linux. The agent marks itself not
 dumpable as it starts, so a process of the same user -- a script, or anything a
 script runs -- cannot read its memory, environment or open files through
-`/proc` or ptrace, and under the systemd unit the key file is root's. On
+`/proc` or ptrace, and under the systemd unit the token file is root's. On
 **Windows** that is not so: a script runs as the service's account, which can
 read `agent_key` and `agent.env`, so put only scripts you trust in the scripts
 folder. On macOS the agent is your own app, running your own scripts as you. A plugin that needs
@@ -172,7 +172,7 @@ itself.
 
 Gryphon sends an absolute path, and the agent answers only for paths inside a
 folder in `GWC_WATCH_DIRS`. Anything else is refused before the file system is
-asked, so neither a Gryphon login nor the key can learn what exists elsewhere.
+asked, so neither a Gryphon login nor the token can learn what exists elsewhere.
 Links are followed only while they stay inside those folders, links inside a
 folder are passed over, and a folder of more than 100,000 entries is refused.
 The agent lists folders and reads dates and sizes; it never opens a file.
@@ -195,10 +195,11 @@ node's Engine.
 
 `deploy/agent/gryphon-agent.service` runs the agent as a throwaway user with no
 capabilities, a read-only system and no new privileges, and reads
-`/etc/gryphon/agent.env`. The key in `/etc/gryphon/agent_key` stays readable by
+`/etc/gryphon/agent.env`. The token in `/etc/gryphon/agent_key` stays readable by
 root only: systemd opens it and passes it to the agent on standard input, which
-the agent reads once and closes. `agent.env` is root's only too, since it can
-hold `GWC_KEY_PREVIOUS` during a rotation and only systemd reads it. Updates replace the unit, so change it with a drop-in
+the agent reads once and closes, and the unit does not start until it exists.
+`agent.env` is root's only too, since it can hold a proxy's credentials and
+only systemd reads it. Updates replace the unit, so change it with a drop-in
 (`sudo systemctl edit gryphon-agent`):
 
 ```ini
@@ -215,23 +216,27 @@ SupplementaryGroups=docker
 ## On macOS
 
 **Gryphon Agent** is the same agent as a menu bar app: no Dock icon, no window,
-a menu to turn it on and off, open it at login, copy the access key and edit
-its settings. On first launch it turns itself on, listening on
-`127.0.0.1:6001` (this Mac only, for a tunnel to reach), and makes a new key.
+a menu to turn it on and off, enter its token, open it at login and edit its
+settings, and a first line saying whether it is connected. On first launch it
+has no token; choose **Enter Token…** and paste the one from the host's page in
+Gryphon.
 
 Settings live in `~/Library/Application Support/Gryphon Agent/config.json`,
 readable by its owner only:
 
 ```json
 {
-  "port": "127.0.0.1:6001",
-  "access_key": "<key>",
+  "token": "<token>",
   "enabled": true,
   "scripts_dir": "/Users/you/Library/Application Support/Gryphon Agent/scripts",
   "watch_dirs": ["/Users/you/Backups"],
   "allow_public_targets": false
 }
 ```
+
+`"server"` (and `"allow_insecure_server"` for `http://`) point it at a Gryphon
+other than the default; the first line of the menu names the server whenever
+it is not the default.
 
 It logs to `~/Library/Logs/Gryphon Agent.log`. Once a day it asks GitHub for
 the latest release and offers a link when there is a newer one; it never
@@ -259,26 +264,24 @@ Then, from PowerShell opened with **Run as administrator**:
 
 ```powershell
 .\gryphon-agent\gryphon-agent.exe service install
-Get-Content C:\ProgramData\Gryphon\agent_key          # paste into the host in Gryphon
-Start-Service GryphonAgent
+& 'C:\Program Files\Gryphon Agent\gryphon-agent.exe' enrol   # paste the token; it is checked, saved and the service started
 ```
 
 `service install`:
 
 - copies the program to `C:\Program Files\Gryphon Agent\`, where only
   administrators can replace it. The downloaded copy can be deleted afterwards.
-- makes `C:\ProgramData\Gryphon\` for the agent's key, settings and scripts.
+- makes `C:\ProgramData\Gryphon\` for the agent's token, settings and scripts.
   Only SYSTEM and Administrators can change anything in it, and only the service
   can read it.
-- makes an access key in `agent_key` if there isn't one, and writes a commented
-  `agent.env`.
+- writes a commented `agent.env`.
 - registers the **GryphonAgent** service. It starts automatically at boot and
-  restarts after a failure, but install does not start it, so it doesn't
-  listen before Gryphon has the key.
+  restarts after a failure, but install does not start it: it has no token
+  until `enrol` gives it one, which starts it.
 
 The service runs as the virtual account `NT SERVICE\GryphonAgent`, with no
-password and no rights beyond an ordinary user's. It listens on
-`127.0.0.1:6001`, and logs to the Application event log as source
+password and no rights beyond an ordinary user's. It connects out to Gryphon
+and listens on nothing, and logs to the Application event log as source
 `GryphonAgent` (Event Viewer → Windows Logs → Application):
 
 ```powershell
@@ -295,25 +298,14 @@ notepad C:\ProgramData\Gryphon\agent.env
 Restart-Service GryphonAgent
 ```
 
-The key stays in `agent_key`. To rotate it, put the new key there and the old
-one in `GWC_KEY_PREVIOUS` in `agent.env`, restart, give Gryphon the new key,
-then remove `GWC_KEY_PREVIOUS` and restart again.
+The token stays in `agent_key`. To change it, replace it on the host's page in
+Gryphon and run `enrol` again with the new one.
 
-### HTTPS
+### The network
 
-As on Linux, put the agent behind a reverse proxy with TLS and give Gryphon the
-`https://` address. [Caddy](https://caddyserver.com) runs on Windows with the
-same two-line Caddyfile as above. A tunnel works too: Cloudflare Tunnel
-(`cloudflared tunnel --url http://127.0.0.1:6001`) or Tailscale Funnel
-(`tailscale funnel 6001`). While the agent listens on loopback, Windows
-Firewall needs no rule. If you set `GWC_PORT` to listen on the network, allow
-the port for the program only, and only as far as the proxy:
-
-```powershell
-New-NetFirewallRule -DisplayName "Gryphon Agent" -Direction Inbound -Action Allow `
-  -Program "C:\Program Files\Gryphon Agent\gryphon-agent.exe" -Protocol TCP -LocalPort 6001 `
-  -RemoteAddress <the proxy's address>
-```
+As on Linux, the agent connects out to Gryphon on port 443 and nothing
+connects to it, so Windows Firewall needs no rule. Behind a proxy, set
+`HTTPS_PROXY` in `agent.env`.
 
 ### What differs from Linux
 
@@ -370,14 +362,14 @@ New-NetFirewallRule -DisplayName "Gryphon Agent" -Direction Inbound -Action Allo
 
 To update, download the newer zip and run its `service install` from an
 elevated PowerShell. It stops the service, replaces the program, and starts it
-again, keeping the key and `agent.env`.
+again, keeping the token and `agent.env`.
 
 ```powershell
 & "C:\Program Files\Gryphon Agent\gryphon-agent.exe" service uninstall
 ```
 
 removes the service and its event log source. It keeps
-`C:\ProgramData\Gryphon` (key and settings) and `C:\Program Files\Gryphon Agent`.
+`C:\ProgramData\Gryphon` (token and settings) and `C:\Program Files\Gryphon Agent`.
 Delete both to remove everything.
 
 ### Without the service
@@ -386,8 +378,8 @@ The program also runs in a console, configured like on Linux, for trying it
 out:
 
 ```powershell
-$env:GWC_KEY = (.\gryphon-agent.exe -genkey)
-.\gryphon-agent.exe -port 127.0.0.1:6001
+$env:GWC_KEY = Read-Host "Token"
+.\gryphon-agent.exe
 ```
 
 Stop it with Ctrl+C.

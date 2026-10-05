@@ -19,7 +19,7 @@ func newTestAgent(t *testing.T, cfg Config) *httptest.Server {
 	if cfg.Key == "" {
 		cfg.Key = handlerTestKey
 	}
-	srv := httptest.NewServer(Handler(cfg, nil))
+	srv := httptest.NewServer(checkHandler(cfg, nil))
 	t.Cleanup(srv.Close)
 	return srv
 }
@@ -38,17 +38,6 @@ func call(t *testing.T, srv *httptest.Server, method, path, key string) (int, ag
 	var out agent.Response
 	_ = json.NewDecoder(resp.Body).Decode(&out)
 	return resp.StatusCode, out, resp.Header
-}
-
-// /healthz answers without a key; nothing else does.
-func TestHealthzNeedsNoKeyAndNothingElseAnswersWithoutOne(t *testing.T) {
-	srv := newTestAgent(t, Config{})
-	if code, _, _ := call(t, srv, http.MethodGet, "/healthz", ""); code != http.StatusOK {
-		t.Errorf("/healthz without a key answered %d", code)
-	}
-	if code, _, h := call(t, srv, http.MethodGet, "/test", ""); code != http.StatusUnauthorized || !agent.RefusedKey(code, h.Get("WWW-Authenticate")) {
-		t.Errorf("/test without a key answered %d %q", code, h.Get("WWW-Authenticate"))
-	}
 }
 
 // /test says which build this is and what it runs; an unknown check says the
@@ -77,37 +66,6 @@ func TestTestAndUnknownCheckCarryTheBuild(t *testing.T) {
 	code, out, _ = call(t, srv, http.MethodPost, "/no-such-check", handlerTestKey)
 	if code != http.StatusNotFound || out.Status != agent.UnknownCheckStatus || out.Version == "" || len(out.Checks) == 0 {
 		t.Errorf("unknown check = %d %+v; want 404 naming the build and the list", code, out)
-	}
-}
-
-// The key being rotated out is accepted alongside the new one.
-func TestPreviousKeyIsAcceptedDuringRotation(t *testing.T) {
-	const old = "old-key-0123456789abcdefghijklmnopqrstuvwxyz"
-	srv := newTestAgent(t, Config{PreviousKey: old})
-	if code, _, _ := call(t, srv, http.MethodGet, "/test", old); code != http.StatusOK {
-		t.Errorf("the previous key was refused: %d", code)
-	}
-	if code, _, _ := call(t, srv, http.MethodGet, "/test", "wrong-key-0123456789abcdefghijklmnopqrstuv"); code != http.StatusUnauthorized {
-		t.Errorf("a wrong key was accepted: %d", code)
-	}
-}
-
-// A caller that keeps presenting a wrong key is throttled; a right key from
-// a throttled caller waits too, which is the point.
-func TestRepeatedWrongKeysAreThrottled(t *testing.T) {
-	srv := newTestAgent(t, Config{})
-	wrong := "wrong-key-0123456789abcdefghijklmnopqrstuv"
-	for i := 0; i < denialLimit; i++ {
-		if code, _, _ := call(t, srv, http.MethodGet, "/test", wrong); code != http.StatusUnauthorized {
-			t.Fatalf("attempt %d answered %d", i, code)
-		}
-	}
-	code, _, h := call(t, srv, http.MethodGet, "/test", wrong)
-	if code != http.StatusTooManyRequests || h.Get("Retry-After") == "" {
-		t.Errorf("after %d wrong keys: %d, Retry-After %q", denialLimit, code, h.Get("Retry-After"))
-	}
-	if code, _, _ := call(t, srv, http.MethodGet, "/test", handlerTestKey); code != http.StatusTooManyRequests {
-		t.Errorf("the right key from a throttled caller answered %d, want 429", code)
 	}
 }
 

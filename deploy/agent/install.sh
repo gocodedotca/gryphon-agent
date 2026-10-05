@@ -54,3 +54,4 @@ install -d -m 0755 /etc/gryphon
 sh deploy/agent/postinstall.sh
 
 echo "Installed $(/usr/bin/gryphon-agent -version 2>/dev/null || echo "$VERSION")."
+[ -s /etc/gryphon/agent_key ] || echo "Next, give it the token from the host's page in Gryphon, which also starts it: sudo gryphon-agent enrol"

@@ -33,9 +33,6 @@ func TestServiceReadsAgentEnvAndDefaults(t *testing.T) {
 	if cfg.agent.Key != key {
 		t.Errorf("key %q, want the one in agent_key", cfg.agent.Key)
 	}
-	if cfg.agent.Addr != serviceDefaultPort {
-		t.Errorf("listens on %q, want %q", cfg.agent.Addr, serviceDefaultPort)
-	}
 	if cfg.agent.MaxConcurrent != 5 {
 		t.Errorf("max concurrent %d, want agent.env's 5", cfg.agent.MaxConcurrent)
 	}

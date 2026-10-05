@@ -1,7 +1,11 @@
 // Command client is the Gryphon client agent as a headless binary for
 // servers. The agent itself is pkg/clientagent; this wraps it in the
 // configuration a server expects -- defaults, then GWC_* environment
-// variables, then flags -- and runs it until told to stop.
+// variables, then flags -- and runs it until told to stop. It connects to
+// Gryphon; nothing listens.
+//
+// `gryphon-agent enrol` takes the token from the host's page in Gryphon,
+// checks it, saves it and starts the agent; see enrol.go.
 package main
 
 import (
@@ -26,9 +30,7 @@ import (
 type config struct {
 	agent     clientagent.Config
 	logFormat string
-	// genKey asks for a new key to be printed instead of running the agent.
-	genKey bool
-	// showVersion asks for the build to be printed instead.
+	// showVersion asks for the build to be printed instead of running.
 	showVersion bool
 }
 
@@ -39,11 +41,11 @@ type config struct {
 // the agent can be handed a Docker or Kubernetes secret — both deliver those as
 // files, never as environment variables.
 func loadConfig(args []string, getenv func(string) string) (config, error) {
-	// GWC_KEY_FILE=- is the key on standard input, which is how the systemd
-	// unit hands it over: systemd opens /etc/gryphon/agent_key as root and
-	// passes it in, so the agent's own user -- and every script it runs as
-	// that user -- has no path to the file. Read here, once, and then
-	// replaced with the key itself for the resolver below.
+	// GWC_KEY_FILE=- is the token on standard input, which is how the
+	// systemd unit hands it over: systemd opens /etc/gryphon/agent_key as
+	// root and passes it in, so the agent's own user -- and every script it
+	// runs as that user -- has no path to the file. Read here, once, and then
+	// replaced with the token itself for the resolver below.
 	if getenv("GWC_KEY_FILE") == keyFromStdin {
 		key, err := readKeyFrom(keyStdin)
 		if err != nil {
@@ -61,12 +63,15 @@ func loadConfig(args []string, getenv func(string) string) (config, error) {
 	// Read through the resolver rather than envOr, so GWC_ALLOW_PUBLIC_TARGETS
 	// gets the file twin and the "that is not a boolean" failure every other
 	// setting gets. It is the flag's default, so a flag still wins.
-	var allowPublicTargets bool
+	var allowPublicTargets, allowInsecureServer bool
 	env.Bool("ALLOW_PUBLIC_TARGETS", &allowPublicTargets)
+	env.Bool("ALLOW_INSECURE_SERVER", &allowInsecureServer)
 
 	fs := flag.NewFlagSet("gryphon-agent", flag.ContinueOnError)
-	port := fs.String("port", envOr("PORT", clientagent.DefaultAddr),
-		"address to listen on: :6001, or 127.0.0.1:6001 behind a reverse proxy on this machine")
+	server := fs.String("server", envOr("SERVER", clientagent.DefaultServer),
+		"the Gryphon to connect to")
+	insecure := fs.Bool("allow-insecure-server", allowInsecureServer,
+		"allow an http:// server: for development, or an installation reached only across its own network")
 	logFormat := fs.String("logformat", envOr("LOG_FORMAT", "text"), "log format: text or json")
 	dockerSocket := fs.String("docker-socket", envOr("DOCKER_SOCKET", clientagent.DefaultDockerSocket),
 		"the Docker Engine's socket, for the container and Swarm checks")
@@ -78,14 +83,11 @@ func loadConfig(args []string, getenv func(string) string) (config, error) {
 		"let the network and database checks dial the public internet; off by default, so the agent reaches its own network only")
 	maxConcurrent := fs.Int("max-concurrent", envInt(env, "MAX_CONCURRENT", clientagent.DefaultMaxConcurrent),
 		"how many checks may run at once; past it the agent answers that it is busy")
-	genKey := fs.Bool("genkey", false, "print a new access key and exit")
 	showVersion := fs.Bool("version", false, "print the build and exit")
 
-	// The access key comes from GWC_KEY or GWC_KEY_FILE and deliberately has no
+	// The token comes from GWC_KEY or GWC_KEY_FILE and deliberately has no
 	// flag: a flag is readable by every user on the machine through ps.
-	// GWC_KEY_PREVIOUS is the key being rotated out, accepted alongside it.
 	key, _ := env.Lookup("KEY")
-	previousKey, _ := env.Lookup("KEY_PREVIOUS")
 
 	// There are deliberately no threshold flags; see clientagent.Config.
 	c := config{}
@@ -100,16 +102,15 @@ func loadConfig(args []string, getenv func(string) string) (config, error) {
 		return c, err
 	}
 
-	c.agent.Addr = *port
+	c.agent.Server = strings.TrimSpace(*server)
+	c.agent.AllowInsecureServer = *insecure
 	c.agent.DockerSocket = *dockerSocket
 	c.agent.ScriptsDir = strings.TrimSpace(*scriptsDir)
 	c.agent.WatchDirs = clientagent.SplitWatchDirs(*watchDirs)
 	c.agent.AllowPublicTargets = *allowPublic
 	c.agent.MaxConcurrent = *maxConcurrent
-	c.agent.PreviousKey = strings.TrimSpace(previousKey)
-	c.genKey = *genKey
 	c.showVersion = *showVersion
-	if c.genKey || c.showVersion {
+	if c.showVersion {
 		return c, nil
 	}
 
@@ -129,9 +130,16 @@ func loadConfig(args []string, getenv func(string) string) (config, error) {
 		return c, fmt.Errorf("GWC_WATCH_DIRS: %w", err)
 	}
 
+	if _, err := clientagent.ConnectURL(c.agent.Server, c.agent.AllowInsecureServer); err != nil {
+		return c, fmt.Errorf("GWC_SERVER: %w", err)
+	}
+
 	c.agent.Key = strings.TrimSpace(key)
+	if c.agent.Key == "" {
+		return c, errors.New("no token: copy one from the host's page in Gryphon and run: gryphon-agent enrol")
+	}
 	if err := clientagent.ValidateKey(c.agent.Key); err != nil {
-		return c, fmt.Errorf("GWC_KEY: %w (generate one with -genkey, then set GWC_KEY or GWC_KEY_FILE)", err)
+		return c, fmt.Errorf("the token is not usable: %w (copy it again from the host's page in Gryphon and run: gryphon-agent enrol)", err)
 	}
 
 	return c, nil
@@ -181,9 +189,14 @@ func main() {
 		os.Exit(1)
 	}
 	// "service install" and "service uninstall" manage the Windows service;
-	// see service_windows.go.
-	if len(os.Args) > 1 && os.Args[1] == "service" {
-		os.Exit(serviceCommand(os.Args[2:]))
+	// see service_windows.go. "enrol" gives the agent its token; enrol.go.
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "service":
+			os.Exit(serviceCommand(os.Args[2:]))
+		case "enrol", "enroll":
+			os.Exit(enrolCommand(os.Args[2:]))
+		}
 	}
 	// Started by the Windows service manager rather than from a console.
 	if isService() {
@@ -209,15 +222,6 @@ func main() {
 		fmt.Println(version.Version())
 		return
 	}
-	if cfg.genKey {
-		key, err := clientagent.GenerateKey()
-		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
-		}
-		fmt.Println(key)
-		return
-	}
 
 	log := newLogger(os.Stdout, cfg.logFormat, true)
 	ag, err := startAgent(cfg, log)
@@ -225,7 +229,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Serve until told to stop, then drain in-flight checks.
+	// Run until told to stop, then let the checks in flight answer.
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 	sig := <-stop
@@ -251,10 +255,10 @@ func newLogger(w io.Writer, format string, withTime bool) *slog.Logger {
 	return slog.New(slog.NewTextHandler(w, opts))
 }
 
-// startAgent starts listening, logging why when it cannot.
-func startAgent(cfg config, log *slog.Logger) (*clientagent.Agent, error) {
-	log.Info("starting Gryphon client agent", "version", version.Version())
-	ag := clientagent.New(cfg.agent, log)
+// startAgent starts connecting, logging why when it cannot. From then on the
+// agent reconnects on its own and logs as it does.
+func startAgent(cfg config, log *slog.Logger) (*clientagent.Connector, error) {
+	ag := clientagent.NewConnector(cfg.agent, log, nil)
 	if err := ag.Start(); err != nil {
 		log.Error("cannot start", "error", err)
 		return nil, err
@@ -262,8 +266,8 @@ func startAgent(cfg config, log *slog.Logger) (*clientagent.Agent, error) {
 	return ag, nil
 }
 
-// stopAgent stops listening and gives in-flight checks ten seconds to finish.
-func stopAgent(ag *clientagent.Agent, log *slog.Logger) {
+// stopAgent disconnects, giving the checks in flight time to answer.
+func stopAgent(ag *clientagent.Connector, log *slog.Logger) {
 	ctx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
 	defer cancel()
 	if err := ag.Stop(ctx); err != nil && !errors.Is(err, context.DeadlineExceeded) {
@@ -271,8 +275,9 @@ func stopAgent(ag *clientagent.Agent, log *slog.Logger) {
 	}
 }
 
-// shutdownGrace is how long stopAgent waits for checks in flight.
-const shutdownGrace = 10 * time.Second
+// shutdownGrace is how long stopAgent waits for checks in flight: each has
+// agent.CheckDeadline, and the close a few seconds more.
+const shutdownGrace = 20 * time.Second
 
 // envInt reads a whole number from the environment, or def when it is unset;
 // a value that is not a number is reported as the flag's own parse error

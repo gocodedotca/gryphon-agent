@@ -139,11 +139,11 @@ func service(name string, running, desired int, mode string, update map[string]a
 // Engine's socket.
 func postDocker(t *testing.T, socket, action, parameters string) agent.Response {
 	t.Helper()
-	body, _ := json.Marshal(agent.Request{Parameters: parameters})
+	body, _ := json.Marshal(map[string]string{"parameters": parameters})
 	req := httptest.NewRequest("POST", "/"+action, bytes.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+testKey)
 	rec := httptest.NewRecorder()
-	Handler(Config{Key: testKey, DockerSocket: socket}, slog.New(slog.DiscardHandler)).ServeHTTP(rec, req)
+	checkHandler(Config{Key: testKey, DockerSocket: socket}, slog.New(slog.DiscardHandler)).ServeHTTP(rec, req)
 
 	if rec.Code != 200 {
 		t.Fatalf("%s: status = %d", action, rec.Code)

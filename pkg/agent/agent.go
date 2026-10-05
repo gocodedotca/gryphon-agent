@@ -47,22 +47,8 @@ const (
 // that.
 const CheckDeadline = 15 * time.Second
 
-// Realm names the agent in the WWW-Authenticate header of a refusal. Gryphon
-// sends the host's access key as "Authorization: Bearer <key>", and an agent
-// that does not accept it answers 401 with `Bearer realm="gryphon-agent"`.
-// The realm is what tells "a Gryphon agent refused this key" apart from a 401
-// that a reverse proxy in front of it sent on its own account.
-const Realm = "gryphon-agent"
-
-// RefusedKey reports whether a response with this status and WWW-Authenticate
-// header is a Gryphon agent refusing the access key, as opposed to any other
-// 401 -- one a reverse proxy in front of the agent sent itself, say, which is a
-// different problem with a different fix.
-func RefusedKey(status int, wwwAuthenticate string) bool {
-	return status == 401 && strings.Contains(wwwAuthenticate, `realm="`+Realm+`"`)
-}
-
-// BearerToken reads "Authorization: Bearer <token>". The scheme is matched
+// BearerToken reads "Authorization: Bearer <token>": the agent's token as it
+// connects, and a vantage's key. The scheme is matched
 // without regard to case, as RFC 9110 says it is. A token longer than any key
 // could be is not a token.
 func BearerToken(r *http.Request) (string, bool) {
@@ -130,14 +116,6 @@ func GenerateKey() (string, error) {
 		return "", err
 	}
 	return base64.RawURLEncoding.EncodeToString(b), nil
-}
-
-// Request is the body Gryphon posts to the agent.
-type Request struct {
-	// Parameters is check-specific: a mount point for disk-space, a DSN for
-	// the database checks, a query string for the network and Docker checks
-	// (see ParamURL). Decrypted by the server before sending.
-	Parameters string `json:"parameters"`
 }
 
 // Response is what the agent returns for a check.
@@ -360,4 +338,97 @@ func plural(n int, unit string) string {
 		return "1 " + unit
 	}
 	return fmt.Sprintf("%d %ss", n, unit)
+}
+
+// The connection.
+//
+// The agent dials Gryphon and keeps one WebSocket open; Gryphon sends checks
+// down it and the agent answers on the same connection. Nothing listens on the
+// monitored host. Every message is one JSON Frame in a text message.
+
+// DefaultServer is the Gryphon an agent connects to unless told otherwise.
+// Compiled into the agent so that a customer only ever supplies a token, and
+// read by the server so that the install steps it shows leave the address out
+// when it is this one.
+const DefaultServer = "https://gryphon.gocode.ca"
+
+// ConnectPath is where the agent connects, under the server's address.
+const ConnectPath = "/agent/v1/connect"
+
+// Subprotocol names this version of the protocol in the WebSocket handshake.
+// A server that does not offer it refuses the connection, which is how an
+// agent too old or too new for the server is told so, before any frame is
+// read wrong.
+const Subprotocol = "gryphon-agent.v1"
+
+// MaxFrameSize bounds one frame in either direction. It is the bound the
+// server used to put on an agent's HTTP answer; nothing legitimate is close.
+const MaxFrameSize = 1 << 20
+
+// KeepaliveInterval is how often each side pings the other. It sits under the
+// sixty seconds reverse proxies commonly allow an idle connection, so a quiet
+// agent is not cut off between checks, and it bounds how long a dead
+// connection goes unnoticed.
+const KeepaliveInterval = 25 * time.Second
+
+// Close codes the server ends a connection with, from the range RFC 6455
+// leaves to applications.
+const (
+	// CloseRevoked: the token this agent connected with was replaced or its
+	// host deleted. Reconnecting with it will be refused, so the agent waits
+	// as long as for any refusal before it tries again.
+	CloseRevoked = 4001
+	// CloseReplaced: another connection presented the same token. Usually
+	// this agent restarting before the server noticed its old connection had
+	// died, in which case nothing hears this; otherwise the token is
+	// installed on two machines, which the server shows on the host.
+	CloseReplaced = 4002
+)
+
+// Frame types.
+const (
+	// FrameHello is the agent's first frame on every connection: which build
+	// it is and what it runs.
+	FrameHello = "hello"
+	// FrameRun asks the agent to run Check with Parameters.
+	FrameRun = "run"
+	// FrameTest asks the agent to say it is there: the round trip behind
+	// "Test agent".
+	FrameTest = "test"
+	// FrameResult answers a run or a test, carrying its ID.
+	FrameResult = "result"
+)
+
+// Frame is one message on the connection. Type says which fields are set.
+type Frame struct {
+	Type string `json:"type"`
+	// ID pairs a result with the run or test it answers. The server chooses
+	// it; the agent only echoes it.
+	ID string `json:"id,omitempty"`
+
+	// Check and Parameters, on a run: the check's name (what used to be the
+	// path the server posted to, "disk-space") and its settings, decrypted
+	// by the server before sending.
+	Check      string `json:"check,omitempty"`
+	Parameters string `json:"parameters,omitempty"`
+
+	// Code and Response, on a result. Code keeps the meanings the HTTP status
+	// had, so the server reads an answer the way it always has: 200 for an
+	// answer, 404 for a check this build does not know (Response.Status is
+	// then UnknownCheckStatus), 400 for a run it could not read, 500 for a
+	// check that panicked.
+	Code     int       `json:"code,omitempty"`
+	Response *Response `json:"response,omitempty"`
+
+	// Hello, on a hello.
+	Hello *Hello `json:"hello,omitempty"`
+}
+
+// Hello is what the agent says about itself when it connects.
+type Hello struct {
+	Version  string   `json:"version"`
+	Checks   []string `json:"checks"`
+	OS       string   `json:"os"`
+	Arch     string   `json:"arch"`
+	Hostname string   `json:"hostname"`
 }

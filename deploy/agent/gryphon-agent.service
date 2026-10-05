@@ -1,12 +1,13 @@
 # The Gryphon client agent, as systemd runs it.
 #
-# Shipped in the .deb and .rpm and installed by install.sh. The agent listens
-# on loopback only; put a reverse proxy with TLS in front of it (Caddyfile
-# beside this file) and give Gryphon the https:// URL.
+# Shipped in the .deb and .rpm and installed by install.sh. The agent connects
+# out to Gryphon; nothing listens, so the machine needs no open port. Enable
+# and start it with `sudo gryphon-agent enrol`, which asks for the token from
+# the host's page in Gryphon.
 #
 # Settings go in /etc/gryphon/agent.env (GWC_* variables; see the readme). The
-# access key is /etc/gryphon/agent_key, readable by root only. systemd opens it
-# and hands it to the agent on standard input, which the agent reads once and
+# token is /etc/gryphon/agent_key, readable by root only. systemd opens it and
+# hands it to the agent on standard input, which the agent reads once and
 # closes: the agent's user has no path to the file, so neither do the scripts
 # it runs as that user.
 [Unit]
@@ -14,10 +15,11 @@ Description=Gryphon client agent
 Documentation=https://github.com/gocodedotca/gryphon-agent#readme
 After=network-online.target
 Wants=network-online.target
+# Not enrolled yet: nothing to connect with, so nothing to start.
+ConditionPathExists=/etc/gryphon/agent_key
 
 [Service]
 ExecStart=/usr/bin/gryphon-agent
-Environment=GWC_PORT=127.0.0.1:6001
 EnvironmentFile=-/etc/gryphon/agent.env
 StandardInput=file:/etc/gryphon/agent_key
 StandardOutput=journal

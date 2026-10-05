@@ -3,13 +3,16 @@
 // Command client-mac is the Gryphon client agent as a macOS menu bar app.
 //
 // The agent itself is pkg/clientagent; this wraps it in the interface a Mac
-// user expects -- an icon in the menu bar with an on/off switch -- and in
-// the configuration a Mac app can have, which is a file rather than flags.
+// user expects -- an icon in the menu bar with an on/off switch and a line
+// saying whether it is connected -- and in the configuration a Mac app can
+// have, which is a file rather than flags. It connects out to Gryphon, so
+// the Mac needs no open port and no tunnel.
 // It has no window and no Dock icon (LSUIElement in the bundle's Info.plist).
 package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -39,13 +42,13 @@ var iconPNG []byte
 type app struct {
 	log      *slog.Logger
 	settings settingsFile
-	agent    *clientagent.Agent
+	agent    *clientagent.Connector
 
-	status  *systray.MenuItem
-	toggle  *systray.MenuItem
-	atLogin *systray.MenuItem
-	copyKey *systray.MenuItem
-	update  *systray.MenuItem
+	status     *systray.MenuItem
+	toggle     *systray.MenuItem
+	atLogin    *systray.MenuItem
+	enterToken *systray.MenuItem
+	update     *systray.MenuItem
 	// updateURL is the release page of the newer build, once one is known.
 	updateURL string
 }
@@ -81,9 +84,9 @@ func (a *app) ready() {
 	a.status = systray.AddMenuItem(appName, "")
 	a.status.Disable()
 	systray.AddSeparator()
-	a.toggle = systray.AddMenuItem("Turn On", "Start or stop answering the Gryphon server")
+	a.toggle = systray.AddMenuItem("Turn On", "Connect to Gryphon, or disconnect")
+	a.enterToken = systray.AddMenuItem("Enter Token…", "Paste the token from this host's page in Gryphon")
 	a.atLogin = systray.AddMenuItemCheckbox("Open at Login", "", loginItemInstalled(bundleID))
-	a.copyKey = systray.AddMenuItem(copyKeyTitle, "Copy the key to paste into this host in Gryphon")
 	edit := systray.AddMenuItem("Edit Settings…", "Open the settings file in your editor")
 	systray.AddSeparator()
 	about := systray.AddMenuItem("Version "+version.Version(), "")
@@ -115,8 +118,8 @@ func (a *app) ready() {
 				}
 			case <-a.atLogin.ClickedCh:
 				a.toggleLoginItem()
-			case <-a.copyKey.ClickedCh:
-				a.copyAccessKey()
+			case <-a.enterToken.ClickedCh:
+				a.askForToken()
 			case <-edit.ClickedCh:
 				a.editSettings()
 			case <-a.update.ClickedCh:
@@ -137,9 +140,10 @@ func (a *app) exit() {
 
 // turnOn re-reads the settings and starts the agent. Reading them here is
 // what makes Edit Settings… take effect without a preferences window: change
-// the file, turn the agent off and on.
+// the file, turn the agent off and on. From then on the status line follows
+// the connection.
 func (a *app) turnOn() {
-	s, minted, err := a.settings.ensureKey()
+	s, err := a.settings.load()
 	if err != nil {
 		a.showError(err)
 		return
@@ -151,24 +155,44 @@ func (a *app) turnOn() {
 	}
 
 	a.stopAgent()
-	a.agent = clientagent.New(cfg, a.log)
+	a.agent = clientagent.NewConnector(cfg, a.log, a.showStatus)
 	if err := a.agent.Start(); err != nil {
 		a.agent = nil
-		a.showError(fmt.Errorf("cannot listen on %s: %w", cfg.Addr, err))
+		a.showError(err)
 		return
 	}
-
-	title := appName + " — listening on " + a.agent.Addr().String()
-	if minted {
-		// A key made now is not the one Gryphon holds. Said where the user
-		// looks, and in the log, rather than discovered as a host that
-		// refuses every check.
-		a.log.Warn("a new access key was made; the host in Gryphon needs it")
-		title += " — new access key made: Copy Access Key and paste it into Gryphon"
-	}
-	a.status.SetTitle(title)
 	a.toggle.SetTitle("Turn Off")
 	a.remember(true)
+}
+
+// showStatus is the connection's state in the status line, where the user
+// looks. The server is named when it is not the default, so a build pointed
+// at a development server cannot quietly report there.
+func (a *app) showStatus(st clientagent.ConnStatus) {
+	where := ""
+	if st.Server != clientagent.DefaultServer {
+		where = " to " + st.Server
+	}
+	var line string
+	switch st.State {
+	case clientagent.Connecting:
+		line = "connecting" + where + "…"
+	case clientagent.Connected:
+		line = "connected" + where
+	case clientagent.Retrying:
+		line = "not connected" + where + "; trying again"
+		if st.Err != nil {
+			line = "not connected" + where + " (" + st.Err.Error() + "); trying again"
+		}
+	case clientagent.Refused:
+		line = "the token was refused: choose Enter Token… to give it a new one"
+		if errors.Is(st.Err, clientagent.ErrIncompatible) {
+			line = "this Gryphon needs a newer agent: update the app"
+		}
+	case clientagent.Stopped:
+		line = "off"
+	}
+	a.status.SetTitle(appName + " — " + line)
 }
 
 func (a *app) turnOff() {
@@ -227,25 +251,36 @@ func (a *app) toggleLoginItem() {
 	}
 }
 
-const copyKeyTitle = "Copy Access Key"
+// tokenPrompt asks for the token in a dialog that does not show what is
+// pasted into it. The app has no window of its own; AppleScript's dialog is
+// the Mac's standard one, and Cancel ends the script with an error, which is
+// how a cancel is told from an empty answer.
+const tokenPrompt = `text returned of (display dialog "Paste the token from this host's page in Gryphon." ` +
+	`default answer "" with hidden answer with title "Gryphon Agent" ` +
+	`buttons {"Cancel", "Connect"} default button "Connect")`
 
-// copyAccessKey puts the key on the clipboard, making one first if there is
-// none yet, and says so in the item's own title for a moment -- a menu that
-// closes on click gives no other place to confirm it.
-func (a *app) copyAccessKey() {
-	s, _, err := a.settings.ensureKey()
+// askForToken takes a token, saves it and connects with it. A token that is
+// not one is said so in the status line; one Gryphon refuses is said so as
+// soon as the agent tries it.
+func (a *app) askForToken() {
+	out, err := exec.Command("osascript", "-e", tokenPrompt).Output()
 	if err != nil {
+		return // cancelled
+	}
+	token := strings.TrimSpace(string(out))
+	if token == "" {
+		return
+	}
+	if err := clientagent.ValidateKey(token); err != nil {
+		a.showError(fmt.Errorf("that is not a token (%w): copy it whole from the host's page", err))
+		return
+	}
+	if err := a.settings.setToken(token); err != nil {
 		a.showError(err)
 		return
 	}
-	cmd := exec.Command("pbcopy")
-	cmd.Stdin = strings.NewReader(strings.TrimSpace(s.AccessKey))
-	if err := cmd.Run(); err != nil {
-		a.log.Error("cannot copy the access key", "error", err)
-		return
-	}
-	a.copyKey.SetTitle("Access Key Copied")
-	time.AfterFunc(3*time.Second, func() { a.copyKey.SetTitle(copyKeyTitle) })
+	a.log.Info("a new token was entered")
+	a.turnOn()
 }
 
 // editSettings makes sure the file exists, then hands it to the default
