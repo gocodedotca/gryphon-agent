@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
 	"sort"
 	"time"
 
@@ -15,9 +16,12 @@ import (
 // handlers runs the agent's checks: one per request from Gryphon, each
 // bounded by its deadline and by the cap on checks in flight.
 type handlers struct {
-	cfg     Config
-	log     *slog.Logger
-	docker  *dockerClient
+	cfg    Config
+	log    *slog.Logger
+	docker *dockerClient
+	// kube is nil unless the agent is running inside a Kubernetes cluster,
+	// which is the only place the Kubernetes checks are offered.
+	kube    *kubeClient
 	scripts *scriptRunner
 	files   *fileWatcher
 	net     *netProbe
@@ -32,6 +36,7 @@ func newHandlers(cfg Config, log *slog.Logger) *handlers {
 		cfg:     cfg,
 		log:     log,
 		docker:  newDockerClient(cfg.DockerSocket),
+		kube:    newKubeClient(os.Getenv, cfg.KubeNodeName, cfg.KubeServiceAccountDir),
 		scripts: newScriptRunner(cfg.ScriptsDir),
 		files:   newFileWatcher(cfg.WatchDirs),
 		net:     newNetProbe(cfg.reach()),
@@ -50,6 +55,11 @@ func (app *handlers) checkNames() []string {
 	}
 	for name := range dockerChecks {
 		names = append(names, name)
+	}
+	if app.kube != nil {
+		for name := range kubeChecks {
+			names = append(names, name)
+		}
 	}
 	if app.cfg.ScriptsDir != "" {
 		names = append(names, "script")
@@ -158,6 +168,9 @@ func (app *handlers) lookup(action string) (checkFunc, bool) {
 	}
 	if fn, ok := dockerChecks[action]; ok {
 		return func(ctx context.Context, params string) result { return fn(app.docker, ctx, params) }, true
+	}
+	if fn, ok := kubeChecks[action]; ok && app.kube != nil {
+		return func(ctx context.Context, params string) result { return fn(app.kube, ctx, params) }, true
 	}
 	if action == "script" {
 		return app.scripts.check, true

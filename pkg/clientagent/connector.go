@@ -363,7 +363,7 @@ func (c *Connector) session(ctx context.Context, h *handlers, target string) (ti
 		}
 	}()
 
-	if err := writeFrame(sctx, conn, helloFrame(h)); err != nil {
+	if err := writeFrame(sctx, conn, helloFrame(sctx, h)); err != nil {
 		conn.CloseNow()
 		return 0, err
 	}
@@ -442,15 +442,19 @@ func dial(ctx context.Context, target, token string) (*websocket.Conn, error) {
 }
 
 // helloFrame is what the agent says about itself on every connection.
-func helloFrame(h *handlers) agent.Frame {
+func helloFrame(ctx context.Context, h *handlers) agent.Frame {
 	hostname, _ := os.Hostname()
-	return agent.Frame{Type: agent.FrameHello, Hello: &agent.Hello{
+	hello := &agent.Hello{
 		Version:  version.Version(),
 		Checks:   h.checkNames(),
 		OS:       runtime.GOOS,
 		Arch:     runtime.GOARCH,
 		Hostname: hostname,
-	}}
+	}
+	if h.kube != nil {
+		hello.Kubernetes = h.kube.info(ctx)
+	}
+	return agent.Frame{Type: agent.FrameHello, Hello: hello}
 }
 
 // Verify connects to Gryphon once with cfg's token, says hello and
@@ -471,7 +475,7 @@ func Verify(ctx context.Context, cfg Config) error {
 	if err != nil {
 		return err
 	}
-	if err := writeFrame(ctx, conn, helloFrame(newHandlers(cfg, slog.New(slog.DiscardHandler)))); err != nil {
+	if err := writeFrame(ctx, conn, helloFrame(ctx, newHandlers(cfg, slog.New(slog.DiscardHandler)))); err != nil {
 		conn.CloseNow()
 		return err
 	}

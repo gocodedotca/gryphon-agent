@@ -109,6 +109,9 @@ func loadConfig(args []string, getenv func(string) string) (config, error) {
 	c.agent.WatchDirs = clientagent.SplitWatchDirs(*watchDirs)
 	c.agent.AllowPublicTargets = *allowPublic
 	c.agent.MaxConcurrent = *maxConcurrent
+	// Set by the Kubernetes manifest from the downward API, and only ever
+	// reported; there is no flag because nobody types it.
+	c.agent.KubeNodeName = envOr("NODE_NAME", "")
 	c.showVersion = *showVersion
 	if c.showVersion {
 		return c, nil
@@ -136,13 +139,23 @@ func loadConfig(args []string, getenv func(string) string) (config, error) {
 
 	c.agent.Key = strings.TrimSpace(key)
 	if c.agent.Key == "" {
-		return c, errors.New("no token: copy one from the host's page in Gryphon and run: gryphon-agent enrol")
+		return c, errors.New("no token: copy one from the host's page in Gryphon and " + tokenFix(getenv))
 	}
 	if err := clientagent.ValidateKey(c.agent.Key); err != nil {
-		return c, fmt.Errorf("the token is not usable: %w (copy it again from the host's page in Gryphon and run: gryphon-agent enrol)", err)
+		return c, fmt.Errorf("the token is not usable: %w (copy it again from the host's page in Gryphon and %s)", err, tokenFix(getenv))
 	}
 
 	return c, nil
+}
+
+// tokenFix is how to give the agent a token, where it is running. In a pod
+// there is nothing to run enrol in: the token is the Secret the manifest
+// mounts.
+func tokenFix(getenv func(string) string) string {
+	if getenv("KUBERNETES_SERVICE_HOST") != "" {
+		return "put it in the gryphon-agent-token Secret: kubectl -n gryphon create secret generic gryphon-agent-token --from-literal=token=<token> (delete the old one first), then kubectl -n gryphon rollout restart deployment/gryphon-agent"
+	}
+	return "run: gryphon-agent enrol"
 }
 
 // keyFromStdin is the GWC_KEY_FILE value that means standard input.

@@ -3,6 +3,11 @@
 #
 #   goreleaser release --snapshot --clean   # try it locally, publishes nothing
 #
+# The container image, for running the agent inside a Kubernetes cluster, goes
+# to ghcr.io/gocodedotca/gryphon-agent:<version> for amd64 and arm64, and the
+# manifests in deploy/kubernetes are attached to the release with that version
+# filled in. The image is pushed when the release is built, draft or not.
+#
 # The Mac agent is a notarized DMG, signed on a Mac and attached to the same
 # release by hand; the Homebrew cask (deploy/homebrew) is built from its URL.
 # The release goes to the repository this runs in, which is where install.sh,
@@ -13,6 +18,13 @@ project_name: gryphon-agent
 before:
   hooks:
     - go mod download
+    # The Kubernetes manifests, with the image's version in place of
+    # __VERSION__, for release.extra_files below. Pinned to this release, so
+    # the manifest and the image it names cannot drift apart.
+    - >-
+      sh -c 'rm -rf build/k8s-release && mkdir -p build/k8s-release &&
+      for f in deploy/kubernetes/*.yaml; do
+      sed "s/__VERSION__/{{ .Version }}/" "$f" > "build/k8s-release/$(basename "$f")"; done'
 
 builds:
   - id: client
@@ -54,6 +66,22 @@ archives:
       - LICENSE
       - README.md
 
+# The image is the Linux binary on distroless/static; deploy/kubernetes/Dockerfile
+# says why that base. One multi-platform image under the plain version, which
+# is what gryphon-agent.yaml names.
+dockers_v2:
+  - id: image
+    ids: [client]
+    dockerfile: deploy/kubernetes/Dockerfile
+    images: ["ghcr.io/gocodedotca/gryphon-agent"]
+    tags: ["{{ .Version }}"]
+    platforms: [linux/amd64, linux/arm64]
+    labels:
+      org.opencontainers.image.source: https://github.com/gocodedotca/gryphon-agent
+      org.opencontainers.image.version: "{{ .Version }}"
+      org.opencontainers.image.licenses: MIT
+      org.opencontainers.image.description: Gryphon agent, for watching a Kubernetes cluster from inside it
+
 checksum:
   name_template: SHA256SUMS
   algorithm: sha256
@@ -90,6 +118,10 @@ release:
   # A tag on the wrong commit is a mistake to catch, not a release.
   draft: true
   prerelease: auto
+  # The Kubernetes manifests the before hook filled in. Gryphon's install
+  # page and host page link them at releases/download/v<version>/.
+  extra_files:
+    - glob: ./build/k8s-release/*.yaml
 
 changelog:
   use: git

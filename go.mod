@@ -10,6 +10,7 @@ require (
 	github.com/gomodule/redigo v1.9.3
 	github.com/jackc/pgx/v5 v5.11.0
 	github.com/prometheus-community/pro-bing v0.9.1
+	github.com/robfig/cron/v3 v3.0.1
 	github.com/shirou/gopsutil/v4 v4.26.8
 	golang.org/x/sys v0.47.0
 	golang.org/x/term v0.45.0

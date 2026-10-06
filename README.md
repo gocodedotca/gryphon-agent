@@ -384,6 +384,41 @@ $env:GWC_KEY = Read-Host "Token"
 
 Stop it with Ctrl+C.
 
+## In a Kubernetes cluster
+
+One agent watches a whole cluster, running inside it as a pod and reading the
+API server: workloads, applications, nodes, crash-looping pods and CronJobs.
+In Gryphon, add a host whose kind is **Kubernetes cluster** and choose
+*Connect an agent*; the token is shown once. Then, with `kubectl` pointed at
+the cluster:
+
+```sh
+kubectl create namespace gryphon
+kubectl -n gryphon create secret generic gryphon-agent-token --from-literal=token=<token>
+kubectl apply -f https://github.com/gocodedotca/gryphon-agent/releases/download/v<version>/gryphon-agent.yaml
+```
+
+The manifest is attached to each release with that release's image,
+`ghcr.io/gocodedotca/gryphon-agent:<version>` (amd64 and arm64,
+distroless, non-root, read-only root filesystem). The copies in
+`deploy/kubernetes` carry `__VERSION__` in its place; use the release's.
+
+What the agent may do is the ClusterRole in `gryphon-agent.yaml`: `get` and
+`list` on nodes, namespaces, pods and the workloads, and nothing else. It
+cannot read Secrets or ConfigMaps, exec into a pod, read logs, or change
+anything. Where cluster-wide access is not an option, apply
+`gryphon-agent-namespaced.yaml` instead, and `gryphon-agent-role.yaml` in each
+namespace to watch (`kubectl apply -n shop -f gryphon-agent-role.yaml`); the
+Nodes check then reports that it was refused.
+
+The agent opens no port and needs no Service or Ingress. For an installation
+of Gryphon of your own, set `GWC_SERVER` on the Deployment
+(`kubectl -n gryphon set env deployment/gryphon-agent GWC_SERVER=https://…`).
+The agent's network checks reach the cluster's own addresses, so an HTTP check
+can name a Service (`web.shop.svc.cluster.local`). The system, Docker, script
+and file checks are not for a cluster: in a pod they would read whichever node
+it landed on.
+
 ## Licence
 
 MIT; see `LICENSE`.

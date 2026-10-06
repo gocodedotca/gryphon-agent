@@ -75,6 +75,16 @@ func TestClientMissingSecretFileIsAnError(t *testing.T) {
 	}
 }
 
+// In a pod, how to give it a token is the Secret, not enrol.
+func TestClientInAPodSaysToSetTheSecret(t *testing.T) {
+	_, err := loadConfig(nil, func(k string) string {
+		return map[string]string{"KUBERNETES_SERVICE_HOST": "10.96.0.1"}[k]
+	})
+	if err == nil || !strings.Contains(err.Error(), "gryphon-agent-token Secret") || strings.Contains(err.Error(), "enrol") {
+		t.Errorf("got %v", err)
+	}
+}
+
 // There is no starting without a token, and the error says how to get one.
 func TestClientRefusesToStartWithoutAKey(t *testing.T) {
 	for name, env := range map[string]map[string]string{

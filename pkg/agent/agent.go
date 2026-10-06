@@ -223,6 +223,21 @@ const (
 	ParamPath    = "path"
 	ParamPattern = "pattern"
 	ParamMinSize = "min_size"
+
+	// The Kubernetes checks' settings. ParamNamespace is the namespace the
+	// thing asked about is in, and ParamName its name. ParamKind is the kind
+	// of workload a k8s-workload check reads: deployment, statefulset or
+	// daemonset. ParamSelector is a label selector in kubectl's syntax
+	// (app.kubernetes.io/part-of=shop), which the API server parses; it
+	// narrows the app, nodes and pods checks. ParamRestarts is how many
+	// restarts of one container make a warning, and ParamWindow, in minutes,
+	// how recent the last of them must be to count; both as digits.
+	ParamNamespace = "namespace"
+	ParamName      = "name"
+	ParamKind      = "kind"
+	ParamSelector  = "selector"
+	ParamRestarts  = "restarts"
+	ParamWindow    = "window"
 )
 
 // MaxScriptName bounds a script check's name.
@@ -431,4 +446,21 @@ type Hello struct {
 	OS       string   `json:"os"`
 	Arch     string   `json:"arch"`
 	Hostname string   `json:"hostname"`
+	// Kubernetes is set only by an agent running inside a cluster, which is
+	// the one place it can answer the Kubernetes checks.
+	Kubernetes *KubernetesInfo `json:"kubernetes,omitempty"`
+}
+
+// KubernetesInfo is what an agent inside a cluster says about the cluster.
+// Hostname is no use there: it is the pod's name, and changes with every
+// restart.
+type KubernetesInfo struct {
+	// Version is the API server's gitVersion ("v1.31.2"), empty when the
+	// agent could not ask.
+	Version string `json:"version,omitempty"`
+	// Namespace is the one the agent runs in.
+	Namespace string `json:"namespace,omitempty"`
+	// Node is the node the agent's pod is on, when the manifest passed it
+	// (GWC_NODE_NAME from the downward API).
+	Node string `json:"node,omitempty"`
 }

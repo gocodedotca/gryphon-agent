@@ -4,7 +4,8 @@
 // local databases) and the network checks themselves (HTTP, HTTPS, ping), run
 // from inside the network, where services the Gryphon server cannot reach
 // are. On a Docker node it also asks the Engine about containers, and on a
-// Swarm manager about services.
+// Swarm manager about services. Run as a pod, it asks the Kubernetes API
+// about the cluster's workloads, nodes, pods and CronJobs instead.
 //
 // The agent only ever dials out (see Connector), speaking the protocol in
 // pkg/agent; nothing listens on the host. cmd/client wraps it as a headless
@@ -74,6 +75,16 @@ type Config struct {
 	// outbound-firewall test. It is their decision, made here, on their own
 	// machine.
 	AllowPublicTargets bool
+
+	// KubeNodeName is the node this agent's pod is on, which the manifest
+	// passes from the downward API. It is only said in the hello, for the
+	// host page; an agent outside Kubernetes leaves it empty.
+	KubeNodeName string
+	// KubeServiceAccountDir is where the pod's ServiceAccount token, CA and
+	// namespace are; the kubelet's own place when empty, which is the only
+	// place they ever are in a pod. Set by tests that stand up an API
+	// server, and by nothing else.
+	KubeServiceAccountDir string
 
 	// Server is the Gryphon the agent connects to, DefaultServer when empty.
 	// Changed for development and for a self-hosted installation; a customer

@@ -1,0 +1,137 @@
+# The Gryphon agent in a Kubernetes cluster, reading the whole cluster.
+#
+#   kubectl create namespace gryphon
+#   kubectl -n gryphon create secret generic gryphon-agent-token --from-literal=token=<token>
+#   kubectl apply -f gryphon-agent.yaml
+#
+# The token is the one the host's page in Gryphon shows once, for a host whose
+# kind is Kubernetes cluster. One agent watches the whole cluster; do not scale
+# it up.
+#
+# What it may do is the ClusterRole below, and nothing else: get and list
+# nodes, namespaces, pods and the workloads. It cannot read Secrets or
+# ConfigMaps, open a shell in a pod, read logs, or change anything. Where
+# cluster-wide access is not an option, gryphon-agent-namespaced.yaml runs the
+# same agent with no ClusterRole, and gryphon-agent-role.yaml grants it one
+# namespace at a time.
+#
+# The release this file came with fills in the image's version. The agent
+# connects out to Gryphon on 443; it opens no port, and needs no Service or
+# Ingress.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: gryphon-agent
+  namespace: gryphon
+  labels:
+    app.kubernetes.io/name: gryphon-agent
+    app.kubernetes.io/part-of: gryphon
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: gryphon-agent
+  labels:
+    app.kubernetes.io/name: gryphon-agent
+    app.kubernetes.io/part-of: gryphon
+rules:
+  - apiGroups: [""]
+    resources: [nodes, namespaces, pods]
+    verbs: [get, list]
+  - apiGroups: [apps]
+    resources: [deployments, statefulsets, daemonsets, replicasets]
+    verbs: [get, list]
+  - apiGroups: [batch]
+    resources: [jobs, cronjobs]
+    verbs: [get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: gryphon-agent
+  labels:
+    app.kubernetes.io/name: gryphon-agent
+    app.kubernetes.io/part-of: gryphon
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: gryphon-agent
+subjects:
+  - kind: ServiceAccount
+    name: gryphon-agent
+    namespace: gryphon
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gryphon-agent
+  namespace: gryphon
+  labels:
+    app.kubernetes.io/name: gryphon-agent
+    app.kubernetes.io/part-of: gryphon
+spec:
+  # One agent per cluster, and never two at once: two pods with one token
+  # would take turns replacing each other's connection, which Gryphon reports
+  # as the token being in use on two machines. Recreate stops the old pod
+  # before starting the new one.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: gryphon-agent
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: gryphon-agent
+        app.kubernetes.io/part-of: gryphon
+    spec:
+      serviceAccountName: gryphon-agent
+      # The agent reads the API server with this account's token.
+      automountServiceAccountToken: true
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        # Lets the agent's group read the token Secret, mounted 0440.
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      terminationGracePeriodSeconds: 20
+      containers:
+        - name: agent
+          image: ghcr.io/gocodedotca/gryphon-agent:__VERSION__
+          env:
+            # Read from a file, never an environment variable: the
+            # Secret's value stays out of the pod's spec and `kubectl
+            # describe`.
+            - name: GWC_KEY_FILE
+              value: /etc/gryphon/token/token
+            # Shown on the host's page, so it is clear where the agent is.
+            - name: GWC_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            # For an installation of Gryphon of your own, uncomment and set:
+            # - name: GWC_SERVER
+            #   value: https://gryphon.example.com
+          volumeMounts:
+            - name: token
+              mountPath: /etc/gryphon/token
+              readOnly: true
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+      volumes:
+        - name: token
+          secret:
+            secretName: gryphon-agent-token
+            defaultMode: 0440

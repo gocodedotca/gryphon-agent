@@ -1,5 +1,6 @@
 .DS_Store
 /tmp/
 /dist/
+/build/k8s-release/
 /client
 /client-mac

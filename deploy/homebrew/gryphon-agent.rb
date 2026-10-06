@@ -13,8 +13,8 @@
 # Installed with:
 #   brew install --cask gocodedotca/gryphon/gryphon-agent
 cask "gryphon-agent" do
-  version "1.1.21"
-  sha256 "419488a7433334efb56ccd4d18fc87a3f4a3e6408f44e71c2ca60bf07071a8e7"
+  version "1.1.25"
+  sha256 "9928af880c2850be2023ecc0d254f8193065b58751018cac78a588878eb47b4b"
 
   url "https://github.com/gocodedotca/gryphon-agent/releases/download/v#{version}/Gryphon.Agent.#{version}.dmg"
   name "Gryphon Agent"

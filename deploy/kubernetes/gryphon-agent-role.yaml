@@ -1,0 +1,42 @@
+# Lets the Gryphon agent read one namespace: apply it in each namespace the
+# agent is to watch, after gryphon-agent-namespaced.yaml.
+#
+#   kubectl apply -n shop -f gryphon-agent-role.yaml
+#
+# No namespace is named below, so -n decides where it goes. The same rules as
+# the cluster-wide manifest, less nodes and namespaces: get and list, and
+# nothing on Secrets, ConfigMaps, exec or logs.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: gryphon-agent
+  labels:
+    app.kubernetes.io/name: gryphon-agent
+    app.kubernetes.io/part-of: gryphon
+rules:
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list]
+  - apiGroups: [apps]
+    resources: [deployments, statefulsets, daemonsets, replicasets]
+    verbs: [get, list]
+  - apiGroups: [batch]
+    resources: [jobs, cronjobs]
+    verbs: [get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: gryphon-agent
+  labels:
+    app.kubernetes.io/name: gryphon-agent
+    app.kubernetes.io/part-of: gryphon
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: gryphon-agent
+subjects:
+  # The agent's account lives in its own namespace, whichever this is.
+  - kind: ServiceAccount
+    name: gryphon-agent
+    namespace: gryphon
