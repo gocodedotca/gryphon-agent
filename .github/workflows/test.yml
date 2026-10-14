@@ -1,6 +1,7 @@
-# The tests on Linux and macOS, on every push and pull request, and before
-# every release (release.yml calls this). Each system has code of its own --
-# the Unix process groups, the Mac app -- that only its own runner exercises.
+# The tests on Linux and macOS, on every push and pull request, and on Linux
+# alone before every release (release.yml calls this with systems). Each
+# system has code of its own -- the Unix process groups, the Mac app -- that
+# only its own runner exercises.
 #
 # The Windows runner is off for now: several tests assert that a round trip
 # took more than zero, and Go's clock on Windows moves in ticks of up to
@@ -14,6 +15,12 @@ on:
     branches: [main]
   pull_request:
   workflow_call:
+    inputs:
+      # A JSON list of runners. A push or pull request has no inputs and
+      # gets both systems.
+      systems:
+        type: string
+        required: false
 
 permissions:
   contents: read
@@ -26,7 +33,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: ${{ fromJSON(inputs.systems || '["ubuntu-latest", "macos-latest"]') }}
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4

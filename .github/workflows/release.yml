@@ -1,8 +1,10 @@
 # Builds the Linux and Windows agent release when a v* tag is pushed, as a
 # draft GitHub release to be looked over and published by hand, once the tests
-# have passed on Linux and macOS (test.yml says why not Windows, for now).
-# .goreleaser.yaml says what is built. The signed Mac DMG is attached to the
-# same release by hand.
+# have passed on Linux (test.yml says why not Windows, for now). Not macOS:
+# GitHub's macOS runners can sit in the queue until the job is cancelled,
+# which held up v1.1.44, and the Mac app is built and tested on a Mac for every
+# release anyway. Pushes to main still test on both. .goreleaser.yaml says
+# what is built. The signed Mac DMG is attached to the same release by hand.
 name: release
 
 on:
@@ -21,6 +23,8 @@ env:
 jobs:
   test:
     uses: ./.github/workflows/test.yml
+    with:
+      systems: '["ubuntu-latest"]'
 
   goreleaser:
     needs: test
