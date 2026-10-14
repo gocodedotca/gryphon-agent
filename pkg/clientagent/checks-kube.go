@@ -6,12 +6,14 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/robfig/cron/v3"
 
 	"github.com/gocodedotca/gryphon-agent/pkg/agent"
+	"github.com/gocodedotca/gryphon-agent/pkg/phrase"
 )
 
 // The Kubernetes checks: what an agent running inside a cluster can read of
@@ -67,10 +69,12 @@ var workloadKinds = map[string]workloadKind{
 type workloadState struct {
 	name           string
 	ready, desired int32
-	// stuck is why a rollout has stopped, empty when it has not.
-	stuck string
-	// note is anything else worth saying: a rollout paused by hand.
-	note string
+	// stuck is whether a rollout has stopped, and stuckWhy the controller's
+	// words for why, when it gave any.
+	stuck    bool
+	stuckWhy string
+	// paused is a rollout paused by hand, which is worth saying.
+	paused bool
 }
 
 func deploymentState(d kubeDeployment) workloadState {
@@ -83,15 +87,10 @@ func deploymentState(d kubeDeployment) workloadState {
 		// progressDeadlineSeconds (ten minutes unless set) and says so here;
 		// the old replicas may well still be serving.
 		if c.Type == "Progressing" && c.Status == "False" && c.Reason == "ProgressDeadlineExceeded" {
-			w.stuck = "rollout stuck"
-			if m := firstLine(c.Message); m != "" {
-				w.stuck += ": " + m
-			}
+			w.stuck, w.stuckWhy = true, firstLine(c.Message)
 		}
 	}
-	if d.Spec.Paused {
-		w.note = "rollout paused"
-	}
+	w.paused = d.Spec.Paused
 	return w
 }
 
@@ -154,7 +153,7 @@ func (k *kubeClient) checkWorkload(ctx context.Context, params string) result {
 	kind, ok := workloadKinds[kindName]
 	if !ok {
 		return result{statusID: agent.StatusUnknown,
-			msg: fmt.Sprintf("%q is not a kind this check reads: deployment, statefulset or daemonset", kindName)}
+			msg: phrase.T("{kind} is not a kind this check reads: deployment, statefulset or daemonset", "kind", strconv.Quote(kindName))}
 	}
 	name, err := p.name(kind.name)
 	if err != nil {
@@ -166,18 +165,21 @@ func (k *kubeClient) checkWorkload(ctx context.Context, params string) result {
 		var kerr *kubeError
 		if asKubeError(err, &kerr) && kerr.notFound() {
 			return result{statusID: agent.StatusProblem,
-				msg: fmt.Sprintf("no %s named %s in namespace %s", kind.name, name, ns)}
+				msg: phrase.T("no {kind} named {name} in namespace {namespace}", "kind", kind.name, "name", name, "namespace", ns)}
 		}
 		return kubeUnknown(err)
 	}
 
-	msg := fmt.Sprintf("%s: %d of %d %s ready", name, w.ready, w.desired, kind.unit)
+	msg := phrase.T("{name}: {ready} of {desired} replicas ready", "name", name, "ready", w.ready, "desired", w.desired)
+	if kind.unit == "nodes" {
+		msg = phrase.T("{name}: {ready} of {desired} nodes ready", "name", name, "ready", w.ready, "desired", w.desired)
+	}
 	data := fmt.Sprintf("%d|%d", w.ready, w.desired)
 
 	status := agent.StatusHealthy
 	switch {
 	case w.desired == 0:
-		status, msg = agent.StatusWarning, name+": scaled to 0"
+		status, msg = agent.StatusWarning, phrase.T("{name}: scaled to 0", "name", name)
 	case w.ready == 0:
 		status = agent.StatusProblem
 	case w.ready < w.desired:
@@ -185,13 +187,16 @@ func (k *kubeClient) checkWorkload(ctx context.Context, params string) result {
 	}
 	// A stuck rollout raises the verdict to a warning and never lowers it,
 	// as a paused Swarm update does: the old replicas may all be serving.
-	if w.stuck != "" {
-		if status != agent.StatusProblem {
-			status = agent.StatusWarning
-		}
-		msg += " (" + w.stuck + ")"
-	} else if w.note != "" {
-		msg += " (" + w.note + ")"
+	if w.stuck && status != agent.StatusProblem {
+		status = agent.StatusWarning
+	}
+	switch {
+	case w.stuck && w.stuckWhy != "":
+		msg = phrase.T("{msg} (rollout stuck: {why})", "msg", msg, "why", w.stuckWhy)
+	case w.stuck:
+		msg = phrase.T("{msg} (rollout stuck)", "msg", msg)
+	case w.paused:
+		msg = phrase.T("{msg} (rollout paused)", "msg", msg)
 	}
 	return result{statusID: status, msg: msg, data: data}
 }
@@ -240,14 +245,14 @@ func (k *kubeClient) checkApp(ctx context.Context, params string) result {
 		all = append(all, named{"daemonset", daemonSetState(d)})
 	}
 
-	scope := "namespace " + ns
-	if sel != "" {
-		scope = sel + " in " + ns
-	}
 	// Nothing matched is a problem rather than a clean bill of health, so
 	// that a mistyped selector does not read as an application that is up.
 	if len(all) == 0 {
-		return result{statusID: agent.StatusProblem, msg: "no deployments, statefulsets or daemonsets match " + scope}
+		msg := phrase.T("no deployments, statefulsets or daemonsets match namespace {namespace}", "namespace", ns)
+		if sel != "" {
+			msg = phrase.T("no deployments, statefulsets or daemonsets match {selector} in {namespace}", "selector", sel, "namespace", ns)
+		}
+		return result{statusID: agent.StatusProblem, msg: msg}
 	}
 
 	sort.Slice(all, func(i, j int) bool {
@@ -263,7 +268,7 @@ func (k *kubeClient) checkApp(ctx context.Context, params string) result {
 		if w.ready > 0 {
 			anyReady++
 		}
-		if w.stuck != "" {
+		if w.stuck {
 			stuck = append(stuck, w.kind+"/"+w.name)
 		}
 		if w.desired > 0 && w.ready == w.desired {
@@ -273,13 +278,24 @@ func (k *kubeClient) checkApp(ctx context.Context, params string) result {
 		short = append(short, fmt.Sprintf("%s/%s %d/%d", w.kind, w.name, w.ready, w.desired))
 	}
 
-	msg := fmt.Sprintf("%s: %d of %d workloads fully ready", scope, whole, len(all))
-	data := fmt.Sprintf("%d|%d", whole, len(all))
-	if len(short) > 0 {
-		msg += " (" + capNames(short) + ")"
+	var msg string
+	switch {
+	case sel == "" && len(short) == 0:
+		msg = phrase.T("namespace {namespace}: {n} of {total} workloads fully ready",
+			"namespace", ns, "n", whole, "total", len(all))
+	case sel == "":
+		msg = phrase.T("namespace {namespace}: {n} of {total} workloads fully ready ({short})",
+			"namespace", ns, "n", whole, "total", len(all), "short", capNames(short))
+	case len(short) == 0:
+		msg = phrase.T("{selector} in {namespace}: {n} of {total} workloads fully ready",
+			"selector", sel, "namespace", ns, "n", whole, "total", len(all))
+	default:
+		msg = phrase.T("{selector} in {namespace}: {n} of {total} workloads fully ready ({short})",
+			"selector", sel, "namespace", ns, "n", whole, "total", len(all), "short", capNames(short))
 	}
+	data := fmt.Sprintf("%d|%d", whole, len(all))
 	if len(stuck) > 0 {
-		msg += "; rollout stuck: " + capNames(stuck)
+		msg = phrase.T("{msg}; rollout stuck: {names}", "msg", msg, "names", capNames(stuck))
 	}
 
 	switch {
@@ -315,12 +331,11 @@ func (k *kubeClient) checkNodes(ctx context.Context, params string) result {
 	if err != nil {
 		return kubeUnknown(err)
 	}
-	scope := "nodes"
-	if sel != "" {
-		scope = "nodes matching " + sel
-	}
 	if len(nodes) == 0 {
-		return result{statusID: agent.StatusProblem, msg: "no " + scope}
+		if sel != "" {
+			return result{statusID: agent.StatusProblem, msg: phrase.T("no nodes matching {selector}", "selector", sel)}
+		}
+		return result{statusID: agent.StatusProblem, msg: phrase.T("no nodes")}
 	}
 	sort.Slice(nodes, func(i, j int) bool { return nodes[i].Metadata.Name < nodes[j].Metadata.Name })
 
@@ -355,21 +370,12 @@ func (k *kubeClient) checkNodes(ctx context.Context, params string) result {
 		}
 	}
 
-	msg := fmt.Sprintf("%d of %d %s ready", ready, len(nodes), scope)
+	msg := phrase.T("{ready} of {total} nodes ready", "ready", ready, "total", len(nodes))
+	if sel != "" {
+		msg = phrase.T("{ready} of {total} nodes matching {selector} ready", "ready", ready, "total", len(nodes), "selector", sel)
+	}
 	data := fmt.Sprintf("%d|%d", ready, len(nodes))
-	var notes []string
-	if len(notReady) > 0 {
-		notes = append(notes, "not ready: "+capNames(notReady))
-	}
-	if len(pressured) > 0 {
-		notes = append(notes, "under pressure: "+capNames(pressured))
-	}
-	if len(cordoned) > 0 {
-		notes = append(notes, "cordoned: "+capNames(cordoned))
-	}
-	if len(notes) > 0 {
-		msg += " (" + strings.Join(notes, "; ") + ")"
-	}
+	msg = nodeNotes(msg, notReady, pressured, cordoned)
 
 	switch {
 	case ready == 0:
@@ -378,6 +384,31 @@ func (k *kubeClient) checkNodes(ctx context.Context, params string) result {
 		return result{statusID: agent.StatusWarning, msg: msg, data: data}
 	}
 	return result{statusID: agent.StatusHealthy, msg: msg, data: data}
+}
+
+// nodeNotes is the nodes check's message with the nodes worth naming said
+// after it: a sentence for each combination, so that each is translated
+// whole.
+func nodeNotes(msg string, notReady, pressured, cordoned []string) string {
+	n, p, c := capNames(notReady), capNames(pressured), capNames(cordoned)
+	switch {
+	case n != "" && p != "" && c != "":
+		return phrase.T("{msg} (not ready: {notready}; under pressure: {pressured}; cordoned: {cordoned})",
+			"msg", msg, "notready", n, "pressured", p, "cordoned", c)
+	case n != "" && p != "":
+		return phrase.T("{msg} (not ready: {notready}; under pressure: {pressured})", "msg", msg, "notready", n, "pressured", p)
+	case n != "" && c != "":
+		return phrase.T("{msg} (not ready: {notready}; cordoned: {cordoned})", "msg", msg, "notready", n, "cordoned", c)
+	case p != "" && c != "":
+		return phrase.T("{msg} (under pressure: {pressured}; cordoned: {cordoned})", "msg", msg, "pressured", p, "cordoned", c)
+	case n != "":
+		return phrase.T("{msg} (not ready: {notready})", "msg", msg, "notready", n)
+	case p != "":
+		return phrase.T("{msg} (under pressure: {pressured})", "msg", msg, "pressured", p)
+	case c != "":
+		return phrase.T("{msg} (cordoned: {cordoned})", "msg", msg, "cordoned", c)
+	}
+	return msg
 }
 
 // stuckReasons are the waiting reasons that mean a container will not come
@@ -434,10 +465,6 @@ func (k *kubeClient) checkPods(ctx context.Context, params string) result {
 	if err != nil {
 		return kubeUnknown(err)
 	}
-	scope := "namespace " + ns
-	if sel != "" {
-		scope = sel + " in " + ns
-	}
 	sort.Slice(pods, func(i, j int) bool { return pods[i].Metadata.Name < pods[j].Metadata.Name })
 
 	now := kubeNow()
@@ -475,25 +502,59 @@ func (k *kubeClient) checkPods(ctx context.Context, params string) result {
 	}
 
 	data := fmt.Sprintf("%d|%d", len(stuck), live)
+	// Each sentence twice: for a namespace, and for a selector in one.
+	bySelector := sel != ""
 	switch {
 	case live == 0:
 		// Healthy, and saying why: a namespace of CronJobs has no pods
 		// between runs. Whether anything is meant to be running is the
 		// workload and app checks' question.
-		return result{statusID: agent.StatusHealthy, data: data,
-			msg: "no running pods match " + scope + ", so none is crash-looping"}
+		msg := phrase.T("no running pods match namespace {namespace}, so none is crash-looping", "namespace", ns)
+		if bySelector {
+			msg = phrase.T("no running pods match {selector} in {namespace}, so none is crash-looping", "selector", sel, "namespace", ns)
+		}
+		return result{statusID: agent.StatusHealthy, data: data, msg: msg}
 	case len(stuck) > 0:
-		msg := fmt.Sprintf("%s: %d of %d pods have a container that will not start: %s", scope, len(stuck), live, capNames(stuck))
+		msg := phrase.T("namespace {namespace}: {n} of {live} pods have a container that will not start: {stuck}",
+			"namespace", ns, "n", len(stuck), "live", live, "stuck", capNames(stuck))
+		if bySelector {
+			msg = phrase.T("{selector} in {namespace}: {n} of {live} pods have a container that will not start: {stuck}",
+				"selector", sel, "namespace", ns, "n", len(stuck), "live", live, "stuck", capNames(stuck))
+		}
 		if len(restarting) > 0 {
-			msg += "; restarting often: " + capNames(restarting)
+			msg = phrase.T("{msg}; restarting often: {names}", "msg", msg, "names", capNames(restarting))
 		}
 		return result{statusID: agent.StatusProblem, msg: msg, data: data}
 	case len(restarting) > 0:
-		return result{statusID: agent.StatusWarning, data: data,
-			msg: fmt.Sprintf("%s: %d pods, restarting often: %s", scope, live, capNames(restarting))}
+		var msg string
+		switch {
+		case live == 1 && bySelector:
+			msg = phrase.T("{selector} in {namespace}: 1 pod, restarting often: {names}",
+				"selector", sel, "namespace", ns, "names", capNames(restarting))
+		case live == 1:
+			msg = phrase.T("namespace {namespace}: 1 pod, restarting often: {names}",
+				"namespace", ns, "names", capNames(restarting))
+		case bySelector:
+			msg = phrase.T("{selector} in {namespace}: {live} pods, restarting often: {names}",
+				"selector", sel, "namespace", ns, "live", live, "names", capNames(restarting))
+		default:
+			msg = phrase.T("namespace {namespace}: {live} pods, restarting often: {names}",
+				"namespace", ns, "live", live, "names", capNames(restarting))
+		}
+		return result{statusID: agent.StatusWarning, data: data, msg: msg}
 	}
-	return result{statusID: agent.StatusHealthy, data: data,
-		msg: fmt.Sprintf("%s: %d pods, none crash-looping", scope, live)}
+	var msg string
+	switch {
+	case live == 1 && bySelector:
+		msg = phrase.T("{selector} in {namespace}: 1 pod, not crash-looping", "selector", sel, "namespace", ns)
+	case live == 1:
+		msg = phrase.T("namespace {namespace}: 1 pod, not crash-looping", "namespace", ns)
+	case bySelector:
+		msg = phrase.T("{selector} in {namespace}: {live} pods, none crash-looping", "selector", sel, "namespace", ns, "live", live)
+	default:
+		msg = phrase.T("namespace {namespace}: {live} pods, none crash-looping", "namespace", ns, "live", live)
+	}
+	return result{statusID: agent.StatusHealthy, data: data, msg: msg}
 }
 
 // cronGrace is how long after its scheduled time a run may take to show up
@@ -536,13 +597,14 @@ func (k *kubeClient) checkCronJob(ctx context.Context, params string) result {
 	if err := k.request(ctx, "get", "cronjobs", ns, path, nil, &cj); err != nil {
 		var kerr *kubeError
 		if asKubeError(err, &kerr) && kerr.notFound() {
-			return result{statusID: agent.StatusProblem, msg: fmt.Sprintf("no CronJob named %s in namespace %s", name, ns)}
+			return result{statusID: agent.StatusProblem,
+				msg: phrase.T("no {kind} named {name} in namespace {namespace}", "kind", "CronJob", "name", name, "namespace", ns)}
 		}
 		return kubeUnknown(err)
 	}
 
 	if cj.Spec.Suspend != nil && *cj.Spec.Suspend {
-		return result{statusID: agent.StatusProblem, data: "suspended", msg: name + ": suspended, so it will not run"}
+		return result{statusID: agent.StatusProblem, data: "suspended", msg: phrase.T("{name}: suspended, so it will not run", "name", name)}
 	}
 
 	spec := cj.Spec.Schedule
@@ -551,22 +613,22 @@ func (k *kubeClient) checkCronJob(ctx context.Context, params string) result {
 		l, err := time.LoadLocation(*tz)
 		if err != nil {
 			return result{statusID: agent.StatusUnknown,
-				msg: fmt.Sprintf("%s: cannot read its time zone %q: %v", name, *tz, err)}
+				msg: phrase.T("{name}: cannot read its time zone {zone}: {err}", "name", name, "zone", strconv.Quote(*tz), "err", err)}
 		}
 		loc = l
 		spec = "CRON_TZ=" + *tz + " " + spec
 	}
 	sched, err := cron.ParseStandard(spec)
 	if err != nil {
-		return result{statusID: agent.StatusUnknown, msg: fmt.Sprintf("%s: cannot read its schedule %q: %v", name, cj.Spec.Schedule, err)}
+		return result{statusID: agent.StatusUnknown,
+			msg: phrase.T("{name}: cannot read its schedule {schedule}: {err}", "name", name, "schedule", strconv.Quote(cj.Spec.Schedule), "err", err)}
 	}
 
 	now := kubeNow()
 	base := cj.Metadata.CreationTimestamp
-	since := "it was created " + humanDuration(now.Sub(base)) + " ago"
-	if t := cj.Status.LastSuccessfulTime; t != nil {
-		base = *t
-		since = "the last success, " + humanDuration(now.Sub(base)) + " ago"
+	succeeded := cj.Status.LastSuccessfulTime != nil
+	if succeeded {
+		base = *cj.Status.LastSuccessfulTime
 	}
 
 	missed := 0
@@ -584,34 +646,60 @@ func (k *kubeClient) checkCronJob(ctx context.Context, params string) result {
 	data := fmt.Sprint(missed)
 
 	at := func(t time.Time) string { return t.In(loc).Format("2006-01-02 15:04 MST") }
+	ago := humanDuration(now.Sub(base))
 	switch {
+	case missed == 0 && !due.IsZero() && !due.After(now):
+		// Due, and still inside cronGrace: the run has started, or failed
+		// already, or not shown up yet, and is not late. It is not the next
+		// run either; that would name a time already gone.
+		var msg string
+		switch {
+		case active && succeeded:
+			msg = phrase.T("{name}: last succeeded {ago} ago; the run due {at} is running", "name", name, "ago", ago, "at", at(due))
+		case active:
+			msg = phrase.T("{name}: the run due {at} is running", "name", name, "at", at(due))
+		case succeeded:
+			msg = phrase.T("{name}: last succeeded {ago} ago; the run due {at} has not succeeded yet", "name", name, "ago", ago, "at", at(due))
+		default:
+			msg = phrase.T("{name}: the run due {at} has not succeeded yet", "name", name, "at", at(due))
+		}
+		return result{statusID: agent.StatusHealthy, msg: msg, data: data}
 	case missed == 0:
-		msg := name + ": last succeeded " + humanDuration(now.Sub(base)) + " ago"
-		if cj.Status.LastSuccessfulTime == nil {
-			msg = name + ": no run due yet"
+		msg := phrase.T("{name}: last succeeded {ago} ago", "name", name, "ago", ago)
+		if !succeeded {
+			msg = phrase.T("{name}: no run due yet", "name", name)
 		}
 		if !due.IsZero() {
-			msg += "; next run " + at(due)
+			msg = phrase.T("{msg}; next run {at}", "msg", msg, "at", at(due))
 		}
 		if active {
-			msg += "; running now"
+			msg = phrase.T("{msg}; running now", "msg", msg)
 		}
 		return result{statusID: agent.StatusHealthy, msg: msg, data: data}
 	case late == 0:
 		return result{statusID: agent.StatusHealthy, data: data,
-			msg: name + ": the run due " + at(first) + " is running"}
+			msg: phrase.T("{name}: the run due {at} is running", "name", name, "at", at(first))}
 	}
 
-	runs := fmt.Sprintf("%d scheduled runs have", missed)
-	if missed >= cronMaxMissed {
-		runs = fmt.Sprintf("%d or more scheduled runs have", cronMaxMissed)
-	}
-	msg := fmt.Sprintf("%s: %s passed since %s without one succeeding (the first was due %s)", name, runs, since, at(first))
-	if missed == 1 {
-		msg = fmt.Sprintf("%s: the run due %s has not succeeded (it failed, or never started)", name, at(first))
+	var msg string
+	switch {
+	case missed == 1:
+		msg = phrase.T("{name}: the run due {at} has not succeeded (it failed, or never started)", "name", name, "at", at(first))
+	case missed >= cronMaxMissed && succeeded:
+		msg = phrase.T("{name}: {n} or more scheduled runs have passed since the last success, {ago} ago without one succeeding (the first was due {at})",
+			"name", name, "n", cronMaxMissed, "ago", ago, "at", at(first))
+	case missed >= cronMaxMissed:
+		msg = phrase.T("{name}: {n} or more scheduled runs have passed since it was created {ago} ago without one succeeding (the first was due {at})",
+			"name", name, "n", cronMaxMissed, "ago", ago, "at", at(first))
+	case succeeded:
+		msg = phrase.T("{name}: {n} scheduled runs have passed since the last success, {ago} ago without one succeeding (the first was due {at})",
+			"name", name, "n", missed, "ago", ago, "at", at(first))
+	default:
+		msg = phrase.T("{name}: {n} scheduled runs have passed since it was created {ago} ago without one succeeding (the first was due {at})",
+			"name", name, "n", missed, "ago", ago, "at", at(first))
 	}
 	if active {
-		msg += "; one is running now"
+		msg = phrase.T("{msg}; one is running now", "msg", msg)
 	}
 	if late == 1 {
 		return result{statusID: agent.StatusWarning, msg: msg, data: data}

@@ -5,6 +5,8 @@ import (
 	"net"
 
 	"github.com/Microsoft/go-winio"
+
+	"github.com/gocodedotca/gryphon-agent/pkg/phrase"
 )
 
 // DefaultDockerSocket is where Docker Desktop and Docker Engine on Windows
@@ -14,7 +16,7 @@ const DefaultDockerSocket = "npipe:////./pipe/docker_engine"
 // dockerPermissionHint is the fix for a pipe the agent may not open. Docker
 // Desktop lets in Administrators and the docker-users group; the Gryphon Agent
 // service's account is NT SERVICE\GryphonAgent.
-const dockerPermissionHint = `the agent's account needs to be in the docker-users group: net localgroup docker-users "NT SERVICE\GryphonAgent" /add`
+var dockerPermissionHint = phrase.Mark(`the agent's account needs to be in the docker-users group: net localgroup docker-users "NT SERVICE\GryphonAgent" /add`)
 
 // dialLocal opens the Engine's named pipe, or a Unix socket, which Windows
 // has too, for any other path.

@@ -13,7 +13,6 @@
 package netcheck
 
 import (
-	"fmt"
 	"net"
 	"net/http"
 	"strings"
@@ -31,13 +30,12 @@ type Outcome struct {
 	RTT time.Duration
 }
 
-func outcome(status int, msg string, args ...any) Outcome {
-	return Outcome{Status: status, Message: fmt.Sprintf(msg, args...)}
-}
-
-func healthy(msg string, args ...any) Outcome { return outcome(agent.StatusHealthy, msg, args...) }
-func problem(msg string, args ...any) Outcome { return outcome(agent.StatusProblem, msg, args...) }
-func unknown(msg string, args ...any) Outcome { return outcome(agent.StatusUnknown, msg, args...) }
+// The messages are written with phrase.T, at the call site, so that each
+// format is one the catalogs can hold and a reader sees translated; see
+// pkg/phrase.
+func healthy(msg string) Outcome { return Outcome{Status: agent.StatusHealthy, Message: msg} }
+func problem(msg string) Outcome { return Outcome{Status: agent.StatusProblem, Message: msg} }
+func unknown(msg string) Outcome { return Outcome{Status: agent.StatusUnknown, Message: msg} }
 
 // NewHTTPClient returns an HTTP client with a real timeout and a connection
 // pool. The old code built a bare &http.Client{} per call, which has no timeout

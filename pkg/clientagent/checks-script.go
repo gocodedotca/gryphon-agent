@@ -4,16 +4,17 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"fmt"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
 
 	"github.com/gocodedotca/gryphon-agent/pkg/agent"
+	"github.com/gocodedotca/gryphon-agent/pkg/phrase"
 )
 
 // The script check: an executable the agent's administrator put in the scripts
@@ -67,60 +68,65 @@ func newScriptRunner(dir string) *scriptRunner {
 func ValidateScriptsDir(dir string) error {
 	info, err := os.Stat(dir)
 	if err != nil {
-		return fmt.Errorf("scripts directory: %w", err)
+		return phrase.Errorf("scripts directory: {err}", "err", err)
 	}
 	if !info.IsDir() {
-		return fmt.Errorf("scripts directory %s is not a directory", dir)
+		return phrase.Errorf("scripts directory {dir} is not a directory", "dir", dir)
 	}
-	if msg := unsafePermissions(dir, info); msg != "" {
-		return fmt.Errorf("scripts directory %s %s", dir, msg)
+	// The problem is a phrase of its own ("is writable by every user on
+	// this machine"), translated with the sentence it is put in.
+	if problem := unsafePermissions(dir, info); problem != "" {
+		return phrase.Errorf("scripts directory {dir} {problem}", "dir", dir, "problem", problem)
 	}
 	return nil
 }
 
-func scriptUnknown(format string, args ...any) result {
-	return result{statusID: agent.StatusUnknown, msg: fmt.Sprintf(format, args...)}
+// scriptUnknown answers unknown with a message written with phrase.T at the
+// call site.
+func scriptUnknown(msg string) result {
+	return result{statusID: agent.StatusUnknown, msg: msg}
 }
 
 func (s *scriptRunner) check(ctx context.Context, params string) result {
 	values, err := url.ParseQuery(params)
 	if err != nil {
-		return scriptUnknown("could not read the check's settings: %v", err)
+		return unreadableSettings(err)
 	}
 	if s.dir == "" {
-		return scriptUnknown("script checks are turned off on this agent: start it with GWC_SCRIPTS_DIR naming a directory of executables")
+		return scriptUnknown(phrase.T("script checks are turned off on this agent: start it with GWC_SCRIPTS_DIR naming a directory of executables"))
 	}
 	name := strings.TrimSpace(values.Get(agent.ParamScript))
 	if !agent.ValidScriptName(name) {
-		return scriptUnknown("%q is not a script name: a file name of letters, digits, dots, dashes and underscores", name)
+		return scriptUnknown(phrase.T("{name} is not a script name: a file name of letters, digits, dots, dashes and underscores",
+			"name", strconv.Quote(name)))
 	}
 	if err := ValidateScriptsDir(s.dir); err != nil {
-		return scriptUnknown("%v, so no script runs from it", err)
+		return scriptUnknown(phrase.T("{err}, so no script runs from it", "err", err))
 	}
 
 	path := filepath.Join(s.dir, name)
 	info, err := os.Stat(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return scriptUnknown("no script called %s in %s", name, s.dir)
+		return scriptUnknown(phrase.T("no script called {name} in {dir}", "name", name, "dir", s.dir))
 	}
 	if err != nil {
-		return scriptUnknown("cannot read script %s: %v", name, err)
+		return scriptUnknown(phrase.T("cannot read script {name}: {err}", "name", name, "err", err))
 	}
 	if !info.Mode().IsRegular() {
-		return scriptUnknown("script %s is not a regular file", name)
+		return scriptUnknown(phrase.T("script {name} is not a regular file", "name", name))
 	}
-	if msg := unsafePermissions(path, info); msg != "" {
-		return scriptUnknown("script %s %s, so the agent will not run it", name, msg)
+	if problem := unsafePermissions(path, info); problem != "" {
+		return scriptUnknown(phrase.T("script {name} {problem}, so the agent will not run it", "name", name, "problem", problem))
 	}
 	if !executable(path, info) {
-		return scriptUnknown("script %s is not executable (%s)", name, notExecutableHint)
+		return scriptUnknown(phrase.T("script {name} is not executable ({hint})", "name", name, "hint", notExecutableHint))
 	}
 
 	select {
 	case s.slots <- struct{}{}:
 		defer func() { <-s.slots }()
 	case <-ctx.Done():
-		return scriptUnknown("script %s did not start: %d scripts were already running", name, maxConcurrentScripts)
+		return scriptUnknown(phrase.T("script {name} did not start: {n} scripts were already running", "name", name, "n", maxConcurrentScripts))
 	}
 
 	runCtx, cancel := context.WithTimeout(ctx, scriptTimeout)
@@ -141,9 +147,9 @@ func (s *scriptRunner) check(ctx context.Context, params string) result {
 	err = runScript(cmd)
 	if runCtx.Err() != nil {
 		if ctx.Err() != nil {
-			return scriptUnknown("script %s was stopped: the check was cancelled", name)
+			return scriptUnknown(phrase.T("script {name} was stopped: the check was cancelled", "name", name))
 		}
-		return scriptUnknown("script %s did not finish within %s and was stopped", name, scriptTimeout)
+		return scriptUnknown(phrase.T("script {name} did not finish within {timeout} and was stopped", "name", name, "timeout", scriptTimeout))
 	}
 
 	code := 0
@@ -152,26 +158,26 @@ func (s *scriptRunner) check(ctx context.Context, params string) result {
 	case errors.As(err, &exitErr):
 		code = exitErr.ExitCode()
 	case err != nil:
-		return scriptUnknown("could not run script %s: %v", name, err)
+		return scriptUnknown(phrase.T("could not run script {name}: {err}", "name", name, "err", err))
 	}
 
 	msg := scriptMessage(stdout.Bytes(), stderr.Bytes())
 	switch code {
 	case 0:
-		return result{statusID: agent.StatusHealthy, msg: orDefault(msg, name+" exited 0 (OK)")}
+		return result{statusID: agent.StatusHealthy, msg: orDefault(msg, phrase.T("{name} exited 0 (OK)", "name", name))}
 	case 1:
-		return result{statusID: agent.StatusWarning, msg: orDefault(msg, name+" exited 1 (warning)")}
+		return result{statusID: agent.StatusWarning, msg: orDefault(msg, phrase.T("{name} exited 1 (warning)", "name", name))}
 	case 2:
-		return result{statusID: agent.StatusProblem, msg: orDefault(msg, name+" exited 2 (critical)")}
+		return result{statusID: agent.StatusProblem, msg: orDefault(msg, phrase.T("{name} exited 2 (critical)", "name", name))}
 	case 3:
-		return result{statusID: agent.StatusUnknown, msg: orDefault(msg, name+" exited 3 (unknown)")}
+		return result{statusID: agent.StatusUnknown, msg: orDefault(msg, phrase.T("{name} exited 3 (unknown)", "name", name))}
 	case -1:
-		return scriptUnknown("script %s was killed by a signal", name)
+		return scriptUnknown(phrase.T("script {name} was killed by a signal", "name", name))
 	}
 	if msg != "" {
-		return scriptUnknown("script %s exited %d, which is not a status (0 to 3): %s", name, code, msg)
+		return scriptUnknown(phrase.T("script {name} exited {code}, which is not a status (0 to 3): {output}", "name", name, "code", code, "output", msg))
 	}
-	return scriptUnknown("script %s exited %d, which is not a status (0 to 3)", name, code)
+	return scriptUnknown(phrase.T("script {name} exited {code}, which is not a status (0 to 3)", "name", name, "code", code))
 }
 
 func orDefault(s, def string) string {

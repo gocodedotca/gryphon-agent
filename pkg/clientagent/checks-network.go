@@ -10,6 +10,7 @@ import (
 
 	"github.com/gocodedotca/gryphon-agent/pkg/agent"
 	"github.com/gocodedotca/gryphon-agent/pkg/netcheck"
+	"github.com/gocodedotca/gryphon-agent/pkg/phrase"
 )
 
 // The network checks: the same HTTP, HTTPS, ping and TCP the Gryphon server runs,
@@ -64,12 +65,23 @@ func newNetProbe(reach netcheck.Reach) *netProbe {
 			TCPFallbackTimeout: 2 * time.Second,
 			Permit:             reach.Permit,
 			Dialer:             dialer,
-			RefusedMessage:     refusedMessage,
+			RefusedMessage:     refusedTarget,
 		},
 		dial: dialer.DialContext,
 	}
 	n.mysqlNetwork = n.registerMySQLNetwork()
 	return n
+}
+
+// settingsProblem is the error for a check whose settings could not be read.
+func settingsProblem(err error) error {
+	return phrase.Errorf("could not read the check's settings: {err}", "err", err)
+}
+
+// unreadableSettings is the answer to a check whose settings could not be
+// read.
+func unreadableSettings(err error) result {
+	return result{statusID: agent.StatusUnknown, msg: settingsProblem(err).Error()}
 }
 
 func fromOutcome(o netcheck.Outcome) result {
@@ -81,28 +93,29 @@ func fromOutcome(o netcheck.Outcome) result {
 func (n *netProbe) checkHTTP(ctx context.Context, scheme, params string) result {
 	values, err := url.ParseQuery(params)
 	if err != nil {
-		return result{statusID: agent.StatusUnknown, msg: "could not read the check's settings: " + err.Error()}
+		return unreadableSettings(err)
 	}
 	raw := strings.TrimSpace(values.Get(agent.ParamURL))
 	if raw == "" {
-		return result{statusID: agent.StatusUnknown, msg: "no URL configured"}
+		return result{statusID: agent.StatusUnknown, msg: phrase.T("no URL configured")}
 	}
 	u, err := url.Parse(raw)
 	if err != nil || u.Host == "" {
-		return result{statusID: agent.StatusUnknown, msg: raw + " is not a URL the agent can fetch"}
+		return result{statusID: agent.StatusUnknown, msg: phrase.T("{url} is not a URL the agent can fetch", "url", raw)}
 	}
 	if !strings.EqualFold(u.Scheme, scheme) {
-		return result{statusID: agent.StatusUnknown, msg: raw + " is not an " + scheme + ":// URL"}
+		return result{statusID: agent.StatusUnknown,
+			msg: phrase.T("{url} is not an {scheme}:// URL", "url", raw, "scheme", scheme)}
 	}
 
 	spec, err := netcheck.ParseFetchSpec(values.Get)
 	if err != nil {
-		return result{statusID: agent.StatusUnknown, msg: "could not read the check's settings: " + err.Error()}
+		return unreadableSettings(err)
 	}
 	// A redirect is dialled through the same rule, so a permitted address
 	// cannot forward the fetch to a forbidden one.
 	spec.Refused = netcheck.Blocked
-	spec.RefusedMessage = refusedMessage
+	spec.RefusedMessage = refusedTarget
 
 	client := n.client
 	if scheme == "https" && strings.EqualFold(values.Get(agent.ParamVerify), "false") {
@@ -120,10 +133,10 @@ func (n *netProbe) checkHTTP(ctx context.Context, scheme, params string) result 
 func (n *netProbe) checkTCP(ctx context.Context, params string) result {
 	target, err := netcheck.ParseTCPParameters(params)
 	if err != nil {
-		return result{statusID: agent.StatusUnknown, msg: "could not read the check's settings: " + err.Error()}
+		return unreadableSettings(err)
 	}
 	if target.Host == "" {
-		return result{statusID: agent.StatusUnknown, msg: "no host configured"}
+		return result{statusID: agent.StatusUnknown, msg: phrase.T("no host configured")}
 	}
 	rtt, err := netcheck.TCPProbe(ctx, n.dial, target)
 	if netcheck.Blocked(err) {
@@ -136,11 +149,11 @@ func (n *netProbe) checkTCP(ctx context.Context, params string) result {
 func (n *netProbe) checkPing(ctx context.Context, params string) result {
 	values, err := url.ParseQuery(params)
 	if err != nil {
-		return result{statusID: agent.StatusUnknown, msg: "could not read the check's settings: " + err.Error()}
+		return unreadableSettings(err)
 	}
 	host := netcheck.NormalizeHost(values.Get(agent.ParamHost))
 	if host == "" {
-		return result{statusID: agent.StatusUnknown, msg: "no host configured"}
+		return result{statusID: agent.StatusUnknown, msg: phrase.T("no host configured")}
 	}
 	return fromOutcome(n.pinger.Ping(ctx, host))
 }

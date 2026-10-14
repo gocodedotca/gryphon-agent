@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gocodedotca/gryphon-agent/pkg/agent"
+	"github.com/gocodedotca/gryphon-agent/pkg/phrase"
 )
 
 // The file-age check: how long ago a file was last written -- a backup, a
@@ -81,12 +82,14 @@ func SplitWatchDirs(s string) []string {
 	return out
 }
 
-func fileUnknown(format string, args ...any) result {
-	return result{statusID: agent.StatusUnknown, msg: fmt.Sprintf(format, args...)}
+// fileUnknown and fileProblem answer with a message written with phrase.T
+// at the call site.
+func fileUnknown(msg string) result {
+	return result{statusID: agent.StatusUnknown, msg: msg}
 }
 
-func fileProblem(format string, args ...any) result {
-	return result{statusID: agent.StatusProblem, msg: fmt.Sprintf(format, args...)}
+func fileProblem(msg string) result {
+	return result{statusID: agent.StatusProblem, msg: msg}
 }
 
 // within reports whether path is root or something under it. filepath.Rel
@@ -117,71 +120,70 @@ func (f *fileWatcher) allowed(path string) bool {
 func (f *fileWatcher) check(ctx context.Context, params string) result {
 	values, err := url.ParseQuery(params)
 	if err != nil {
-		return fileUnknown("could not read the check's settings: %v", err)
+		return unreadableSettings(err)
 	}
 	if len(f.dirs) == 0 {
-		return fileUnknown("file checks are turned off on this agent: start it with GWC_WATCH_DIRS naming the folders it may look in")
+		return fileUnknown(phrase.T("file checks are turned off on this agent: start it with GWC_WATCH_DIRS naming the folders it may look in"))
 	}
 
 	raw := strings.TrimSpace(values.Get(agent.ParamPath))
 	if raw == "" || !filepath.IsAbs(raw) {
-		return fileUnknown("%q is not an absolute path", raw)
+		return fileUnknown(phrase.T("{path} is not an absolute path", "path", strconv.Quote(raw)))
 	}
 	path := filepath.Clean(raw)
 	// Before the file system is asked anything, so a path outside says
 	// nothing about what is there.
 	if !f.allowed(path) {
-		return fileUnknown("%s is not inside a folder this agent watches (%s)", path, strings.Join(f.dirs, string(filepath.ListSeparator)))
+		return fileUnknown(phrase.T("{path} is not inside a folder this agent watches ({dirs})",
+			"path", path, "dirs", strings.Join(f.dirs, string(filepath.ListSeparator))))
 	}
 
 	pattern := strings.TrimSpace(values.Get(agent.ParamPattern))
 	if pattern != "" {
 		if _, err := filepath.Match(pattern, ""); err != nil || strings.ContainsRune(pattern, filepath.Separator) {
-			return fileUnknown("%q is not a file name pattern", pattern)
+			return fileUnknown(phrase.T("{pattern} is not a file name pattern", "pattern", strconv.Quote(pattern)))
 		}
 	}
 	var minSize int64
 	if s := strings.TrimSpace(values.Get(agent.ParamMinSize)); s != "" {
 		if minSize, err = strconv.ParseInt(s, 10, 64); err != nil || minSize < 0 {
-			return fileUnknown("%q is not a size in bytes", s)
+			return fileUnknown(phrase.T("{value} is not a size in bytes", "value", strconv.Quote(s)))
 		}
 	}
 
 	resolved, err := filepath.EvalSymlinks(path)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
-		return fileProblem("nothing at %s", path)
+		return fileProblem(phrase.T("nothing at {path}", "path", path))
 	case err != nil:
-		return fileUnknown("cannot read %s: %v", path, err)
+		return fileUnknown(phrase.T("cannot read {path}: {err}", "path", path, "err", err))
 	case !f.allowed(resolved):
-		return fileUnknown("%s leads outside the folders this agent watches", path)
+		return fileUnknown(phrase.T("{path} leads outside the folders this agent watches", "path", path))
 	}
 
 	info, err := os.Stat(resolved)
 	if err != nil {
-		return fileUnknown("cannot read %s: %v", path, err)
+		return fileUnknown(phrase.T("cannot read {path}: {err}", "path", path, "err", err))
 	}
 
-	name, what := filepath.Base(path), ""
-	if info.IsDir() {
-		newest, count, err := newestFile(ctx, resolved, pattern)
+	// For a folder, the newest file in it, and how many it was the newest
+	// of. Each wording is a sentence of its own: with a count of one or
+	// many, with the pattern or without it.
+	name, isFolder, count := filepath.Base(path), info.IsDir(), 0
+	if isFolder {
+		newest, n, err := newestFile(ctx, resolved, pattern)
 		if err != nil {
-			return fileUnknown("cannot read the folder %s: %v", path, err)
+			return fileUnknown(phrase.T("cannot read the folder {path}: {err}", "path", path, "err", err))
 		}
 		if newest == nil {
 			if pattern != "" {
-				return fileProblem("no file matching %s in %s", pattern, path)
+				return fileProblem(phrase.T("no file matching {pattern} in {path}", "pattern", pattern, "path", path))
 			}
-			return fileProblem("no files in %s", path)
+			return fileProblem(phrase.T("no files in {path}", "path", path))
 		}
-		info, name = newest, newest.Name()
-		what = fmt.Sprintf("newest of %d file%s", count, map[bool]string{true: "", false: "s"}[count == 1])
-		if pattern != "" {
-			what += " matching " + pattern
-		}
-		what += ": "
+		info, name, count = newest, newest.Name(), n
 	} else if !info.Mode().IsRegular() {
-		return fileUnknown("%s is not a file or a folder", path)
+		return fileUnknown(phrase.T("{path} is not a file or a folder", "path", path))
 	}
 
 	age := time.Since(info.ModTime())
@@ -190,17 +192,46 @@ func (f *fileWatcher) check(ctx context.Context, params string) result {
 		age = 0
 	}
 	hours := math.Round(age.Hours()*100) / 100
-	msg := fmt.Sprintf("%s%s, %s, modified %s ago", what, name, agent.FormatSize(info.Size()), agent.HumanDuration(age))
+	args := []any{
+		"name", name, "size", agent.FormatSize(info.Size()), "age", agent.HumanDuration(age),
+		"count", count, "pattern", pattern, "min", agent.FormatSize(minSize),
+	}
 
-	res := measured(hours, msg, "")
 	if minSize > 0 && info.Size() < minSize {
 		// A reading and a verdict both: the age still charts, and the size
 		// makes it a problem whatever the age is.
+		var msg string
+		switch {
+		case !isFolder:
+			msg = phrase.T("{name} is {size}, under the {min} minimum (modified {age} ago)", args...)
+		case count == 1 && pattern == "":
+			msg = phrase.T("newest of 1 file: {name} is {size}, under the {min} minimum (modified {age} ago)", args...)
+		case count == 1:
+			msg = phrase.T("newest of 1 file matching {pattern}: {name} is {size}, under the {min} minimum (modified {age} ago)", args...)
+		case pattern == "":
+			msg = phrase.T("newest of {count} files: {name} is {size}, under the {min} minimum (modified {age} ago)", args...)
+		default:
+			msg = phrase.T("newest of {count} files matching {pattern}: {name} is {size}, under the {min} minimum (modified {age} ago)", args...)
+		}
+		res := measured(hours, msg, "")
 		res.statusID = agent.StatusProblem
-		res.msg = fmt.Sprintf("%s%s is %s, under the %s minimum (modified %s ago)",
-			what, name, agent.FormatSize(info.Size()), agent.FormatSize(minSize), agent.HumanDuration(age))
+		return res
 	}
-	return res
+
+	var msg string
+	switch {
+	case !isFolder:
+		msg = phrase.T("{name}, {size}, modified {age} ago", args...)
+	case count == 1 && pattern == "":
+		msg = phrase.T("newest of 1 file: {name}, {size}, modified {age} ago", args...)
+	case count == 1:
+		msg = phrase.T("newest of 1 file matching {pattern}: {name}, {size}, modified {age} ago", args...)
+	case pattern == "":
+		msg = phrase.T("newest of {count} files: {name}, {size}, modified {age} ago", args...)
+	default:
+		msg = phrase.T("newest of {count} files matching {pattern}: {name}, {size}, modified {age} ago", args...)
+	}
+	return measured(hours, msg, "")
 }
 
 // newestFile is the most recently modified regular file directly in dir whose
@@ -246,7 +277,7 @@ func newestFile(ctx context.Context, dir, pattern string) (fs.FileInfo, int, err
 			return nil, 0, err
 		}
 		if seen >= maxFolderEntries {
-			return nil, 0, fmt.Errorf("it has more than %d entries; point the check at a file, or a smaller folder", maxFolderEntries)
+			return nil, 0, phrase.Errorf("it has more than {n} entries; point the check at a file, or a smaller folder", "n", maxFolderEntries)
 		}
 		if ctx.Err() != nil {
 			return nil, 0, ctx.Err()

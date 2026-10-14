@@ -3,15 +3,17 @@ package clientagent
 import (
 	"context"
 	"errors"
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
+
+	"github.com/gocodedotca/gryphon-agent/pkg/phrase"
 )
 
 // The same rule as on Unix, in Windows' terms: nothing another user on this
@@ -71,24 +73,24 @@ func unsafePermissions(path string, _ os.FileInfo) string {
 	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
 		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
 	if err != nil {
-		return fmt.Sprintf("has permissions the agent cannot read (%v)", err)
+		return phrase.T("has permissions the agent cannot read ({err})", "err", err)
 	}
 
 	owner, _, err := sd.Owner()
 	if err != nil || owner == nil {
-		return "has no owner the agent can read"
+		return phrase.T("has no owner the agent can read")
 	}
 	if !trustedSID(owner) {
-		return fmt.Sprintf("is owned by %s, not Administrators, SYSTEM or the agent's account (fix: icacls %q /setowner *S-1-5-32-544)",
-			accountName(owner), path)
+		return phrase.T("is owned by {account}, not Administrators, SYSTEM or the agent's account (fix: icacls {path} /setowner *S-1-5-32-544)",
+			"account", accountName(owner), "path", strconv.Quote(path))
 	}
 
 	dacl, _, err := sd.DACL()
 	if errors.Is(err, windows.ERROR_OBJECT_NOT_FOUND) || (err == nil && dacl == nil) {
-		return "has no access control list, so every user on this machine can change it"
+		return phrase.T("has no access control list, so every user on this machine can change it")
 	}
 	if err != nil {
-		return fmt.Sprintf("has permissions the agent cannot read (%v)", err)
+		return phrase.T("has permissions the agent cannot read ({err})", "err", err)
 	}
 	for _, e := range aceEntries(dacl) {
 		if e.flags&aceInheritOnly != 0 {
@@ -101,12 +103,12 @@ func unsafePermissions(path string, _ os.FileInfo) string {
 			continue
 		case aceAccessAllowed, aceAccessAllowedCallback:
 			if e.mask&changeRights != 0 && !trustedSID(e.sid) {
-				return fmt.Sprintf("can be changed by %s (fix: icacls %q /remove:g *%s)",
-					accountName(e.sid), path, e.sid.String())
+				return phrase.T("can be changed by {account} (fix: icacls {path} /remove:g *{sid})",
+					"account", accountName(e.sid), "path", strconv.Quote(path), "sid", e.sid.String())
 			}
 		default:
 			if e.mask&changeRights != 0 {
-				return "has a permission entry the agent cannot judge"
+				return phrase.T("has a permission entry the agent cannot judge")
 			}
 		}
 	}
@@ -293,7 +295,7 @@ func executable(path string, _ os.FileInfo) bool {
 	return scriptExtensions[strings.ToLower(filepath.Ext(path))]
 }
 
-const notExecutableHint = "Windows runs .exe, .com, .bat, .cmd and .ps1 files; name it with one of those"
+var notExecutableHint = phrase.Mark("Windows runs .exe, .com, .bat, .cmd and .ps1 files; name it with one of those")
 
 // scriptCommand runs a .ps1 through Windows PowerShell, named by its full
 // path so a powershell.exe elsewhere on PATH is never the one run. The

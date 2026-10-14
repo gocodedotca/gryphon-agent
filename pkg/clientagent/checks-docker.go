@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/gocodedotca/gryphon-agent/pkg/agent"
+	"github.com/gocodedotca/gryphon-agent/pkg/phrase"
 )
 
 // The Docker checks: what a node agent can see of the containers on it, and
@@ -42,12 +43,12 @@ func (d *dockerClient) checkSwarmService(ctx context.Context, params string) res
 		var derr *dockerError
 		if asDockerError(err, &derr) && derr.notManager() {
 			return result{statusID: agent.StatusUnknown,
-				msg: "this node is not a Swarm manager, so it cannot see service " + name + "; attach this check to a manager node"}
+				msg: phrase.T("this node is not a Swarm manager, so it cannot see service {name}; attach this check to a manager node", "name", name)}
 		}
 		return unknownResult(err)
 	}
 	if !ok {
-		return result{statusID: agent.StatusProblem, msg: "no service named " + name + " in this swarm"}
+		return result{statusID: agent.StatusProblem, msg: phrase.T("no service named {name} in this swarm", "name", name)}
 	}
 
 	running, desired, err := d.taskCounts(ctx, svc)
@@ -55,17 +56,16 @@ func (d *dockerClient) checkSwarmService(ctx context.Context, params string) res
 		return unknownResult(err)
 	}
 
-	mode := "replicas"
+	msg := phrase.T("{name}: {n} of {desired} replicas running", "name", name, "n", running, "desired", desired)
 	if svc.Spec.Mode.Global != nil {
-		mode = "nodes"
+		msg = phrase.T("{name}: {n} of {desired} nodes running", "name", name, "n", running, "desired", desired)
 	}
-	msg := fmt.Sprintf("%s: %d of %d %s running", name, running, desired, mode)
 	data := fmt.Sprintf("%d|%d", running, desired)
 
 	status := agent.StatusHealthy
 	switch {
 	case desired == 0:
-		status, msg = agent.StatusWarning, name+": scaled to 0"
+		status, msg = agent.StatusWarning, phrase.T("{name}: scaled to 0", "name", name)
 	case running == 0:
 		status = agent.StatusProblem
 	case running < desired:
@@ -80,9 +80,21 @@ func (d *dockerClient) checkSwarmService(ctx context.Context, params string) res
 		if status != agent.StatusProblem {
 			status = agent.StatusWarning
 		}
-		msg = fmt.Sprintf("%s (update %s: %s)", msg, u.State, strings.TrimSpace(u.Message))
+		msg = updatePaused(msg, u.State, strings.TrimSpace(u.Message))
 	}
 	return result{statusID: status, msg: msg, data: data}
+}
+
+// updatePaused is msg with the paused update said after it, in Docker's
+// words for why.
+func updatePaused(msg, state, why string) string {
+	switch state {
+	case "paused":
+		return phrase.T("{msg} (update paused: {why})", "msg", msg, "why", why)
+	case "rollback_paused":
+		return phrase.T("{msg} (update rollback_paused: {why})", "msg", msg, "why", why)
+	}
+	return phrase.T("{msg} (update {state}: {why})", "msg", msg, "state", state, "why", why)
 }
 
 // checkSwarmStack reports how many of a stack's services have every task
@@ -100,12 +112,12 @@ func (d *dockerClient) checkSwarmStack(ctx context.Context, params string) resul
 		var derr *dockerError
 		if asDockerError(err, &derr) && derr.notManager() {
 			return result{statusID: agent.StatusUnknown,
-				msg: "this node is not a Swarm manager, so it cannot see stack " + name + "; attach this check to a manager node"}
+				msg: phrase.T("this node is not a Swarm manager, so it cannot see stack {name}; attach this check to a manager node", "name", name)}
 		}
 		return unknownResult(err)
 	}
 	if len(services) == 0 {
-		return result{statusID: agent.StatusProblem, msg: "no stack named " + name + " in this swarm"}
+		return result{statusID: agent.StatusProblem, msg: phrase.T("no stack named {name} in this swarm", "name", name)}
 	}
 
 	// Sorted so the message reads the same from one run to the next, and so
@@ -132,14 +144,16 @@ func (d *dockerClient) checkSwarmStack(ctx context.Context, params string) resul
 			strings.TrimPrefix(svc.Spec.Name, name+"_"), running, desired))
 	}
 
-	msg := fmt.Sprintf("%s: %d of %d services fully running", name, whole, len(services))
+	msg := phrase.T("{name}: {n} of {total} services fully running", "name", name, "n", whole, "total", len(services))
 	data := fmt.Sprintf("%d|%d", whole, len(services))
-	if len(short) > 0 {
-		// Enough to act on; the service check on each is where the detail is.
-		if len(short) > 8 {
-			short = append(short[:8], fmt.Sprintf("and %d more", len(short)-8))
-		}
-		msg += " (" + strings.Join(short, ", ") + ")"
+	// Enough to act on; the service check on each is where the detail is.
+	switch {
+	case len(short) > 8:
+		msg = phrase.T("{name}: {n} of {total} services fully running ({short}, and {more} more)",
+			"name", name, "n", whole, "total", len(services), "short", strings.Join(short[:8], ", "), "more", len(short)-8)
+	case len(short) > 0:
+		msg = phrase.T("{name}: {n} of {total} services fully running ({short})",
+			"name", name, "n", whole, "total", len(services), "short", strings.Join(short, ", "))
 	}
 
 	switch {
@@ -163,67 +177,141 @@ func (d *dockerClient) checkContainer(ctx context.Context, params string) result
 	if err != nil {
 		var derr *dockerError
 		if asDockerError(err, &derr) && derr.notFound() {
-			return result{statusID: agent.StatusProblem, msg: "no container named " + name + " on this node"}
+			return result{statusID: agent.StatusProblem, msg: phrase.T("no container named {name} on this node", "name", name)}
 		}
 		return unknownResult(err)
 	}
 
+	// Each state is a sentence of its own, with or without the uptime and
+	// the reason: a sentence per combination is what lets a reader's
+	// language have each one (pkg/phrase). The restarts and an out-of-memory
+	// kill come after the sentence (withNotes), or before the reason when
+	// there is one, which is where the agent has always put them.
 	st := c.State
-	notes := ""
-	if c.RestartCount > 0 {
-		notes += fmt.Sprintf(", restarted %d times", c.RestartCount)
-	}
-	if st.OOMKilled {
-		notes += ", killed for exceeding its memory limit"
-	}
-
+	notes := containerNotes(c)
 	switch st.Status {
 	case "running":
+		started, err := time.Parse(time.RFC3339Nano, st.StartedAt)
+		hasUp := err == nil
 		up := ""
-		if t, err := time.Parse(time.RFC3339Nano, st.StartedAt); err == nil {
-			up = " for " + humanDuration(time.Since(t))
+		if hasUp {
+			up = humanDuration(time.Since(started))
 		}
 		if h := st.Health; h != nil {
 			switch h.Status {
 			case "healthy":
-				return result{statusID: agent.StatusHealthy, data: h.Status,
-					msg: fmt.Sprintf("%s: running%s, healthcheck passing%s", name, up, notes)}
+				msg := phrase.T("{name}: running, healthcheck passing", "name", name)
+				if hasUp {
+					msg = phrase.T("{name}: running for {up}, healthcheck passing", "name", name, "up", up)
+				}
+				return result{statusID: agent.StatusHealthy, data: h.Status, msg: withNotes(msg, c)}
 			case "starting":
-				return result{statusID: agent.StatusWarning, data: h.Status,
-					msg: fmt.Sprintf("%s: running%s, healthcheck still starting%s", name, up, notes)}
+				msg := phrase.T("{name}: running, healthcheck still starting", "name", name)
+				if hasUp {
+					msg = phrase.T("{name}: running for {up}, healthcheck still starting", "name", name, "up", up)
+				}
+				return result{statusID: agent.StatusWarning, data: h.Status, msg: withNotes(msg, c)}
 			default:
 				why := ""
 				if n := len(h.Log); n > 0 {
-					why = ": " + firstLine(h.Log[n-1].Output)
+					why = firstLine(h.Log[n-1].Output)
 				}
-				return result{statusID: agent.StatusProblem, data: h.Status,
-					msg: fmt.Sprintf("%s: running%s but its healthcheck has failed %d times in a row%s%s",
-						name, up, h.FailingStreak, notes, why)}
+				var msg string
+				switch {
+				case hasUp && why != "" && notes != "":
+					return result{statusID: agent.StatusProblem, data: h.Status,
+						msg: phrase.T("{name}: running for {up} but its healthcheck has failed {n} times in a row, {notes}: {why}",
+							"name", name, "up", up, "n", h.FailingStreak, "notes", notes, "why", why)}
+				case why != "" && notes != "":
+					return result{statusID: agent.StatusProblem, data: h.Status,
+						msg: phrase.T("{name}: running but its healthcheck has failed {n} times in a row, {notes}: {why}",
+							"name", name, "n", h.FailingStreak, "notes", notes, "why", why)}
+				case hasUp && why != "":
+					msg = phrase.T("{name}: running for {up} but its healthcheck has failed {n} times in a row: {why}",
+						"name", name, "up", up, "n", h.FailingStreak, "why", why)
+				case hasUp:
+					msg = phrase.T("{name}: running for {up} but its healthcheck has failed {n} times in a row",
+						"name", name, "up", up, "n", h.FailingStreak)
+				case why != "":
+					msg = phrase.T("{name}: running but its healthcheck has failed {n} times in a row: {why}",
+						"name", name, "n", h.FailingStreak, "why", why)
+				default:
+					msg = phrase.T("{name}: running but its healthcheck has failed {n} times in a row",
+						"name", name, "n", h.FailingStreak)
+				}
+				return result{statusID: agent.StatusProblem, data: h.Status, msg: withNotes(msg, c)}
 			}
 		}
-		return result{statusID: agent.StatusHealthy, data: st.Status,
-			msg: fmt.Sprintf("%s: running%s%s", name, up, notes)}
+		msg := phrase.T("{name}: running", "name", name)
+		if hasUp {
+			msg = phrase.T("{name}: running for {up}", "name", name, "up", up)
+		}
+		return result{statusID: agent.StatusHealthy, data: st.Status, msg: withNotes(msg, c)}
 
 	case "paused":
 		return result{statusID: agent.StatusWarning, data: st.Status,
-			msg: fmt.Sprintf("%s: paused%s", name, notes)}
+			msg: withNotes(phrase.T("{name}: paused", "name", name), c)}
 
 	case "restarting":
 		return result{statusID: agent.StatusProblem, data: st.Status,
-			msg: fmt.Sprintf("%s: restarting after exit code %d%s", name, st.ExitCode, notes)}
+			msg: withNotes(phrase.T("{name}: restarting after exit code {code}", "name", name, "code", st.ExitCode), c)}
 
 	case "created":
 		return result{statusID: agent.StatusProblem, data: st.Status,
-			msg: fmt.Sprintf("%s: created but never started%s", name, notes)}
-
-	default: // exited, dead, removing
-		why := ""
-		if st.Error != "" {
-			why = ": " + firstLine(st.Error)
-		}
-		return result{statusID: agent.StatusProblem, data: st.Status,
-			msg: fmt.Sprintf("%s: %s with code %d%s%s", name, st.Status, st.ExitCode, notes, why)}
+			msg: withNotes(phrase.T("{name}: created but never started", "name", name), c)}
 	}
+
+	// exited, dead, removing: exited, by far the usual one, in words of its
+	// own, and the others in Docker's.
+	why := firstLine(st.Error)
+	var msg string
+	switch {
+	case st.Status == "exited" && why != "" && notes != "":
+		return result{statusID: agent.StatusProblem, data: st.Status,
+			msg: phrase.T("{name}: exited with code {code}, {notes}: {why}", "name", name, "code", st.ExitCode, "notes", notes, "why", why)}
+	case why != "" && notes != "":
+		return result{statusID: agent.StatusProblem, data: st.Status,
+			msg: phrase.T("{name}: {state} with code {code}, {notes}: {why}",
+				"name", name, "state", st.Status, "code", st.ExitCode, "notes", notes, "why", why)}
+	case st.Status == "exited" && why != "":
+		msg = phrase.T("{name}: exited with code {code}: {why}", "name", name, "code", st.ExitCode, "why", why)
+	case st.Status == "exited":
+		msg = phrase.T("{name}: exited with code {code}", "name", name, "code", st.ExitCode)
+	case why != "":
+		msg = phrase.T("{name}: {state} with code {code}: {why}", "name", name, "state", st.Status, "code", st.ExitCode, "why", why)
+	default:
+		msg = phrase.T("{name}: {state} with code {code}", "name", name, "state", st.Status, "code", st.ExitCode)
+	}
+	return result{statusID: agent.StatusProblem, data: st.Status, msg: withNotes(msg, c)}
+}
+
+// containerNotes is what else is worth knowing about a container -- that it
+// has been restarted, and that it was killed for its memory -- for a message
+// that says it before a reason, or "".
+func containerNotes(c containerInspect) string {
+	switch {
+	case c.RestartCount > 0 && c.State.OOMKilled:
+		return phrase.T("restarted {n} times, killed for exceeding its memory limit", "n", c.RestartCount)
+	case c.RestartCount > 0:
+		return phrase.T("restarted {n} times", "n", c.RestartCount)
+	case c.State.OOMKilled:
+		return phrase.T("killed for exceeding its memory limit")
+	}
+	return ""
+}
+
+// withNotes is a container's message with what else is worth knowing said
+// after it: that it has been restarted, and that it was killed for its
+// memory. Each is a format around the message, so the message itself is
+// still recognised whichever of them follow it.
+func withNotes(msg string, c containerInspect) string {
+	if c.RestartCount > 0 {
+		msg = phrase.T("{msg}, restarted {n} times", "msg", msg, "n", c.RestartCount)
+	}
+	if c.State.OOMKilled {
+		msg = phrase.T("{msg}, killed for exceeding its memory limit", "msg", msg)
+	}
+	return msg
 }
 
 // checkContainerMemory measures a container's memory as a percentage of its
@@ -240,7 +328,7 @@ func (d *dockerClient) checkContainerMemory(ctx context.Context, params string) 
 		return d.cannotMeasure(name, err)
 	}
 	if !c.State.Running {
-		return result{statusID: agent.StatusUnknown, msg: name + " is not running (" + c.State.Status + ")"}
+		return result{statusID: agent.StatusUnknown, msg: phrase.T("{name} is not running ({state})", "name", name, "state", c.State.Status)}
 	}
 
 	s, err := d.stats(ctx, name, true)
@@ -249,7 +337,7 @@ func (d *dockerClient) checkContainerMemory(ctx context.Context, params string) 
 	}
 	m := s.MemoryStats
 	if m.Limit == 0 {
-		return result{statusID: agent.StatusUnknown, msg: "Docker reported no memory figures for " + name}
+		return result{statusID: agent.StatusUnknown, msg: phrase.T("Docker reported no memory figures for {name}", "name", name)}
 	}
 
 	// The page cache is reclaimable and does not count against the limit for
@@ -265,12 +353,13 @@ func (d *dockerClient) checkContainerMemory(ctx context.Context, params string) 
 	}
 	pct := float64(used) / float64(m.Limit) * 100
 
-	ceiling := "of its " + humanBytes(m.Limit) + " limit"
+	msg := phrase.T("{name}: {pct} used, {used} of its {limit} limit",
+		"name", name, "pct", percent(pct), "used", humanBytes(used), "limit", humanBytes(m.Limit))
 	if c.HostConfig.Memory == 0 {
-		ceiling = "of the node's " + humanBytes(m.Limit) + " (no memory limit)"
+		msg = phrase.T("{name}: {pct} used, {used} of the node's {limit} (no memory limit)",
+			"name", name, "pct", percent(pct), "used", humanBytes(used), "limit", humanBytes(m.Limit))
 	}
-	return measured(pct,
-		fmt.Sprintf("%s: %.1f%% used, %s %s", name, pct, humanBytes(used), ceiling),
+	return measured(pct, msg,
 		fmt.Sprintf("%d|%d", used/1024, m.Limit/1024))
 }
 
@@ -287,7 +376,7 @@ func (d *dockerClient) checkContainerCPU(ctx context.Context, params string) res
 		return d.cannotMeasure(name, err)
 	}
 	if !c.State.Running {
-		return result{statusID: agent.StatusUnknown, msg: name + " is not running (" + c.State.Status + ")"}
+		return result{statusID: agent.StatusUnknown, msg: phrase.T("{name} is not running ({state})", "name", name, "state", c.State.Status)}
 	}
 
 	// Two samples a second apart, taken by the Engine, so precpu_stats is
@@ -299,7 +388,7 @@ func (d *dockerClient) checkContainerCPU(ctx context.Context, params string) res
 	cpuDelta := float64(s.CPUStats.CPUUsage.TotalUsage) - float64(s.PreCPUStats.CPUUsage.TotalUsage)
 	sysDelta := float64(s.CPUStats.SystemCPUUsage) - float64(s.PreCPUStats.SystemCPUUsage)
 	if sysDelta <= 0 || cpuDelta < 0 {
-		return result{statusID: agent.StatusUnknown, msg: "Docker reported no CPU sample for " + name}
+		return result{statusID: agent.StatusUnknown, msg: phrase.T("Docker reported no CPU sample for {name}", "name", name)}
 	}
 	cores := float64(s.CPUStats.OnlineCPUs)
 	if cores == 0 {
@@ -316,12 +405,12 @@ func (d *dockerClient) checkContainerCPU(ctx context.Context, params string) res
 	if limit > 0 {
 		pct := usedCores / limit * 100
 		return measured(pct,
-			fmt.Sprintf("%s: %.1f%% of its %s CPU limit", name, pct, trimFloat(limit)),
+			phrase.T("{name}: {pct} of its {limit} CPU limit", "name", name, "pct", percent(pct), "limit", trimFloat(limit)),
 			fmt.Sprintf("%d|%d", int64(usedCores*1000), int64(limit*1000)))
 	}
 	pct := share * 100
 	return measured(pct,
-		fmt.Sprintf("%s: %.1f%% of the node's %s CPUs (no CPU limit)", name, pct, trimFloat(cores)),
+		phrase.T("{name}: {pct} of the node's {cores} CPUs (no CPU limit)", "name", name, "pct", percent(pct), "cores", trimFloat(cores)),
 		fmt.Sprintf("%d|%d", int64(usedCores*1000), int64(cores*1000)))
 }
 
@@ -344,7 +433,7 @@ func containerCPULimit(c containerInspect) float64 {
 func (d *dockerClient) cannotMeasure(name string, err error) result {
 	var derr *dockerError
 	if asDockerError(err, &derr) && derr.notFound() {
-		return result{statusID: agent.StatusUnknown, msg: "no container named " + name + " on this node"}
+		return result{statusID: agent.StatusUnknown, msg: phrase.T("no container named {name} on this node", "name", name)}
 	}
 	return unknownResult(err)
 }

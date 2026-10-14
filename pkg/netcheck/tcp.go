@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gocodedotca/gryphon-agent/pkg/agent"
+	"github.com/gocodedotca/gryphon-agent/pkg/phrase"
 )
 
 // The TCP checks: a service Gryphon has no check of its own for.
@@ -104,11 +105,11 @@ const (
 func (e *ExpectError) Error() string {
 	switch e.Why {
 	case ExpectTimedOut:
-		return "the expected response did not arrive in time"
+		return phrase.T("the expected response did not arrive in time")
 	case ExpectLimit:
-		return "the expected response was not in the first 4 KB"
+		return phrase.T("the expected response was not in the first 4 KB")
 	}
-	return "the connection closed without the expected response"
+	return phrase.T("the connection closed without the expected response")
 }
 
 // ParseTCPParameters reads a TCP check's parameter string: a URL query string
@@ -133,19 +134,19 @@ func ParseTCPParameters(params string) (TCPTarget, error) {
 	switch t.TLS {
 	case TLSNone, TLSVerify, TLSNoVerify:
 	default:
-		return t, fmt.Errorf("%q is not a TLS setting", t.TLS)
+		return t, phrase.Errorf("{value} is not a TLS setting", "value", strconv.Quote(t.TLS))
 	}
 	if t.Send, err = DecodeEscapes(values.Get(agent.ParamSend)); err != nil {
-		return t, fmt.Errorf("send: %w", err)
+		return t, phrase.Errorf("send: {err}", "err", err)
 	}
 	if t.Expect, err = DecodeEscapes(values.Get(agent.ParamExpect)); err != nil {
-		return t, fmt.Errorf("expect: %w", err)
+		return t, phrase.Errorf("expect: {err}", "err", err)
 	}
 	if len(t.Send) > MaxSend {
-		return t, fmt.Errorf("send is %d bytes; the most a check sends is %d", len(t.Send), MaxSend)
+		return t, phrase.Errorf("send is {n} bytes; the most a check sends is {max}", "n", len(t.Send), "max", MaxSend)
 	}
 	if len(t.Expect) > MaxExpect {
-		return t, fmt.Errorf("expect is %d bytes; the most a check looks for is %d", len(t.Expect), MaxExpect)
+		return t, phrase.Errorf("expect is {n} bytes; the most a check looks for is {max}", "n", len(t.Expect), "max", MaxExpect)
 	}
 	return t, nil
 }
@@ -154,7 +155,7 @@ func ParseTCPParameters(params string) (TCPTarget, error) {
 func ValidPort(port string) error {
 	n, err := strconv.Atoi(strings.TrimSpace(port))
 	if err != nil || n < 1 || n > 65535 {
-		return fmt.Errorf("%q is not a port number (1 to 65535)", port)
+		return phrase.Errorf("{port} is not a port number (1 to 65535)", "port", strconv.Quote(port))
 	}
 	return nil
 }
@@ -173,7 +174,7 @@ func DecodeEscapes(s string) ([]byte, error) {
 		}
 		i++
 		if i == len(s) {
-			return nil, errors.New(`a backslash at the end needs something after it (\\ for a backslash)`)
+			return nil, phrase.Errorf(`a backslash at the end needs something after it (\\ for a backslash)`)
 		}
 		switch s[i] {
 		case 'r':
@@ -188,16 +189,16 @@ func DecodeEscapes(s string) ([]byte, error) {
 			out = append(out, '\\')
 		case 'x':
 			if i+2 >= len(s) {
-				return nil, errors.New(`\x needs two hex digits, as in \x1b`)
+				return nil, phrase.Errorf(`\x needs two hex digits, as in \x1b`)
 			}
 			b, err := strconv.ParseUint(s[i+1:i+3], 16, 8)
 			if err != nil {
-				return nil, errors.New(`\x needs two hex digits, as in \x1b`)
+				return nil, phrase.Errorf(`\x needs two hex digits, as in \x1b`)
 			}
 			out = append(out, byte(b))
 			i += 2
 		default:
-			return nil, fmt.Errorf(`\%c is not an escape this check understands (\r \n \t \0 \\ \xHH)`, s[i])
+			return nil, phrase.Errorf(`\{char} is not an escape this check understands (\r \n \t \0 \\ \xHH)`, "char", string(rune(s[i])))
 		}
 	}
 	return out, nil
@@ -215,7 +216,7 @@ func TCPProbe(ctx context.Context, dial DialFunc, t TCPTarget) (time.Duration, e
 		dial = (&net.Dialer{}).DialContext
 	}
 	if strings.TrimSpace(t.Host) == "" {
-		return 0, errors.New("no address to connect to")
+		return 0, phrase.Errorf("no address to connect to")
 	}
 
 	probeCtx, cancel := context.WithTimeout(ctx, tcpTimeout)
@@ -253,7 +254,7 @@ func TCPProbe(ctx context.Context, dial DialFunc, t TCPTarget) (time.Duration, e
 
 	if len(t.Send) > 0 {
 		if _, err := conn.Write(t.Send); err != nil {
-			return 0, fmt.Errorf("cannot send: %w", err)
+			return 0, phrase.Errorf("cannot send: {err}", "err", err)
 		}
 	}
 	if len(t.Expect) == 0 {
@@ -289,7 +290,9 @@ func TCPProbe(ctx context.Context, dial DialFunc, t TCPTarget) (time.Duration, e
 // certificate this check accepts or with TLS at all.
 type TLSError struct{ Err error }
 
-func (e *TLSError) Error() string { return "TLS handshake failed: " + e.Err.Error() }
+func (e *TLSError) Error() string {
+	return phrase.T("TLS handshake failed: {err}", "err", e.Err)
+}
 func (e *TLSError) Unwrap() error { return e.Err }
 
 // TCPOutcome judges a probe. ctx is the one the probe ran under: when it has
@@ -305,62 +308,81 @@ func TCPOutcome(ctx context.Context, t TCPTarget, rtt time.Duration, err error) 
 	if err == nil {
 		if len(t.Expect) > 0 {
 			return Outcome{
-				Status:  agent.StatusHealthy,
-				Message: fmt.Sprintf("%s - answered with %q in %s", addr, t.Expect, RoundRTT(rtt)),
-				RTT:     rtt,
+				Status: agent.StatusHealthy,
+				Message: phrase.T("{target} - answered with {expect} in {rtt}",
+					"target", addr, "expect", strconv.Quote(string(t.Expect)), "rtt", RoundRTT(rtt)),
+				RTT: rtt,
 			}
 		}
 		return Outcome{
 			Status:  agent.StatusHealthy,
-			Message: fmt.Sprintf("%s - accepting connections, connected in %s", addr, RoundRTT(rtt)),
+			Message: phrase.T("{target} - accepting connections, connected in {rtt}", "target", addr, "rtt", RoundRTT(rtt)),
 			RTT:     rtt,
 		}
 	}
 	if ctx.Err() != nil {
-		return unknown("%s - check cancelled or timed out", addr)
+		return unknown(phrase.T("{target} - check cancelled or timed out", "target", addr))
 	}
 
 	var expectErr *ExpectError
 	if errors.As(err, &expectErr) {
-		got := "nothing"
-		if len(expectErr.Got) > 0 {
-			got = Excerpt(expectErr.Got)
+		expect := strconv.Quote(string(t.Expect))
+		// "got nothing" is a sentence of its own, rather than "nothing" as a
+		// value, so that it is translated with the rest.
+		if len(expectErr.Got) == 0 {
+			switch expectErr.Why {
+			case ExpectTimedOut:
+				return problem(phrase.T("{target} - did not answer with {expect} within {timeout}; got nothing",
+					"target", addr, "expect", expect, "timeout", tcpTimeout))
+			case ExpectLimit:
+				return problem(phrase.T("{target} - {expect} was not in the first 4 KB of the response; got nothing",
+					"target", addr, "expect", expect))
+			}
+			return problem(phrase.T("{target} - closed the connection without answering {expect}; got nothing",
+				"target", addr, "expect", expect))
 		}
+		got := Excerpt(expectErr.Got)
 		switch expectErr.Why {
 		case ExpectTimedOut:
-			return problem("%s - did not answer with %q within %s; got %s", addr, t.Expect, tcpTimeout, got)
+			return problem(phrase.T("{target} - did not answer with {expect} within {timeout}; got {got}",
+				"target", addr, "expect", expect, "timeout", tcpTimeout, "got", got))
 		case ExpectLimit:
-			return problem("%s - %q was not in the first 4 KB of the response; got %s", addr, t.Expect, got)
+			return problem(phrase.T("{target} - {expect} was not in the first 4 KB of the response; got {got}",
+				"target", addr, "expect", expect, "got", got))
 		}
-		return problem("%s - closed the connection without answering %q; got %s", addr, t.Expect, got)
+		return problem(phrase.T("{target} - closed the connection without answering {expect}; got {got}",
+			"target", addr, "expect", expect, "got", got))
 	}
 
 	var tlsErr *TLSError
 	if errors.As(err, &tlsErr) {
 		var unknownAuthority x509.UnknownAuthorityError
 		if errors.As(err, &unknownAuthority) {
-			return problem("%s - %v (for a self-signed certificate, choose %s)", addr, err, TLSNoVerify)
+			return problem(phrase.T("{target} - TLS handshake failed: {err} (for a self-signed certificate, choose {mode})",
+				"target", addr, "err", tlsErr.Err, "mode", TLSNoVerify))
 		}
-		return problem("%s - %v", addr, err)
+		return problem(phrase.T("{target} - TLS handshake failed: {err}", "target", addr, "err", tlsErr.Err))
 	}
 
 	var dnsErr *net.DNSError
 	if errors.As(err, &dnsErr) {
 		if dnsErr.IsNotFound {
-			return problem("%s - name does not resolve", addr)
+			return problem(phrase.T("{target} - name does not resolve", "target", addr))
 		}
 		if dnsErr.IsTemporary || dnsErr.IsTimeout {
-			return unknown("%s - name server did not answer: %v", addr, err)
+			return unknown(phrase.T("{target} - name server did not answer: {err}", "target", addr, "err", err))
 		}
 	}
 	if isConnectionRefused(err) {
-		return problem("%s - connection refused", addr)
+		return problem(phrase.T("{target} - connection refused", "target", addr))
 	}
 	var netErr net.Error
 	if errors.As(err, &netErr) && netErr.Timeout() {
-		return problem("%s - did not accept a connection within %s", addr, tcpTimeout)
+		return problem(phrase.T("{target} - did not accept a connection within {timeout}", "target", addr, "timeout", tcpTimeout))
 	}
-	return problem("%s - %v", addr, err)
+	// Whatever else the dial said, in its own words: there is no sentence of
+	// ours here to translate.
+	return problem(addr + " - " + err.Error())
 }
 
 // Excerpt quotes the front of a response for a message: printable ASCII as it

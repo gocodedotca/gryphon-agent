@@ -13,10 +13,12 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/gocodedotca/gryphon-agent/pkg/agent"
+	"github.com/gocodedotca/gryphon-agent/pkg/phrase"
 )
 
 // The Kubernetes API, from inside the cluster.
@@ -134,20 +136,21 @@ type kubeError struct {
 func (e *kubeError) Error() string {
 	switch e.status {
 	case http.StatusUnauthorized:
-		return "the Kubernetes API refused the agent's ServiceAccount token"
+		return phrase.T("the Kubernetes API refused the agent's ServiceAccount token")
 	case http.StatusForbidden:
-		where := "across the cluster"
-		fix := "apply gryphon-agent.yaml, the cluster-wide manifest"
+		// The verb and the resource are RBAC's own words, as a Role names
+		// them.
 		if e.namespace != "" {
-			where = "in namespace " + e.namespace
-			fix = "apply gryphon-agent-role.yaml in " + e.namespace + ", or the cluster-wide gryphon-agent.yaml"
+			return phrase.T("the agent's ServiceAccount may not {verb} {resource} in namespace {namespace} (apply gryphon-agent-role.yaml in {namespace}, or the cluster-wide gryphon-agent.yaml)",
+				"verb", e.verb, "resource", e.resource, "namespace", e.namespace)
 		}
-		return fmt.Sprintf("the agent's ServiceAccount may not %s %s %s (%s)", e.verb, e.resource, where, fix)
+		return phrase.T("the agent's ServiceAccount may not {verb} {resource} across the cluster (apply gryphon-agent.yaml, the cluster-wide manifest)",
+			"verb", e.verb, "resource", e.resource)
 	}
 	if e.message == "" {
-		return fmt.Sprintf("the Kubernetes API answered %d", e.status)
+		return phrase.T("the Kubernetes API answered {status}", "status", e.status)
 	}
-	return "Kubernetes: " + e.message
+	return phrase.T("Kubernetes: {message}", "message", e.message)
 }
 
 func (e *kubeError) notFound() bool { return e.status == http.StatusNotFound }
@@ -158,7 +161,7 @@ func asKubeError(err error, target **kubeError) bool { return errors.As(err, tar
 func (k *kubeClient) token() (string, error) {
 	b, err := os.ReadFile(k.tokenPath)
 	if err != nil {
-		return "", fmt.Errorf("reading the ServiceAccount token: %w", err)
+		return "", phrase.Errorf("reading the ServiceAccount token: {err}", "err", err)
 	}
 	return strings.TrimSpace(string(b)), nil
 }
@@ -190,7 +193,7 @@ func (k *kubeClient) request(ctx context.Context, verb, resource, namespace, pat
 		if uerr, ok := err.(*url.Error); ok {
 			err = uerr.Err
 		}
-		return fmt.Errorf("cannot reach the Kubernetes API at %s: %v", k.base, err)
+		return phrase.Errorf("cannot reach the Kubernetes API at {address}: {err}", "address", k.base, "err", err.Error())
 	}
 	defer resp.Body.Close()
 
@@ -207,7 +210,7 @@ func (k *kubeClient) request(ctx context.Context, verb, resource, namespace, pat
 	// Decoded as it streams, into only the fields out names: a page of
 	// pods is mostly spec nobody here reads.
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 64<<20)).Decode(out); err != nil {
-		return fmt.Errorf("reading the Kubernetes API's answer: %w", err)
+		return phrase.Errorf("reading the Kubernetes API's answer: {err}", "err", err)
 	}
 	return nil
 }
@@ -230,7 +233,8 @@ func list[T any](ctx context.Context, k *kubeClient, resource, namespace, path, 
 	}
 	for page := 0; ; page++ {
 		if page == kubeMaxPages {
-			return nil, fmt.Errorf("more than %d %s match; narrow the check with a selector", kubeMaxPages*kubePageSize, resource)
+			return nil, phrase.Errorf("more than {n} {resource} match; narrow the check with a selector",
+				"n", kubeMaxPages*kubePageSize, "resource", resource)
 		}
 		var l kubeList[T]
 		if err := k.request(ctx, "list", resource, namespace, path, q, &l); err != nil {
@@ -252,7 +256,7 @@ type kubeParams struct {
 func readKubeParams(params string) (kubeParams, error) {
 	v, err := url.ParseQuery(params)
 	if err != nil {
-		return kubeParams{}, errors.New("could not read the check's settings: " + err.Error())
+		return kubeParams{}, settingsProblem(err)
 	}
 	return kubeParams{values: v}, nil
 }
@@ -261,12 +265,12 @@ func readKubeParams(params string) (kubeParams, error) {
 func (p kubeParams) namespace() (string, error) {
 	ns := strings.TrimSpace(p.values.Get(agent.ParamNamespace))
 	if ns == "" {
-		return "", errors.New("no namespace configured")
+		return "", phrase.Errorf("no namespace configured")
 	}
 	// Held to Kubernetes' grammar so that nothing Gryphon sends can be more
 	// than a name by the time it is in a path.
 	if !agent.ValidKubeNamespace(ns) {
-		return "", fmt.Errorf("%q is not a namespace name Kubernetes would accept", ns)
+		return "", phrase.Errorf("{namespace} is not a namespace name Kubernetes would accept", "namespace", strconv.Quote(ns))
 	}
 	return ns, nil
 }
@@ -275,10 +279,10 @@ func (p kubeParams) namespace() (string, error) {
 func (p kubeParams) name(what string) (string, error) {
 	name := strings.TrimSpace(p.values.Get(agent.ParamName))
 	if name == "" {
-		return "", errors.New("no " + what + " name configured")
+		return "", phrase.Errorf("no {kind} name configured", "kind", what)
 	}
 	if !agent.ValidKubeName(name) {
-		return "", fmt.Errorf("%q is not a %s name Kubernetes would accept", name, what)
+		return "", phrase.Errorf("{name} is not a {kind} name Kubernetes would accept", "name", strconv.Quote(name), "kind", what)
 	}
 	return name, nil
 }
@@ -288,13 +292,18 @@ func (p kubeParams) name(what string) (string, error) {
 // wrong with it; here it is only bounded.
 func (p kubeParams) selector() (string, error) {
 	sel := strings.TrimSpace(p.values.Get(agent.ParamSelector))
+	// agent.KubeSelectorProblem's two problems, each a sentence of its own.
 	if problem := agent.KubeSelectorProblem(sel); problem != "" {
-		return "", errors.New("the label selector " + problem)
+		if len(sel) > agent.MaxKubeSelector {
+			return "", phrase.Errorf("the label selector is longer than {max} characters", "max", agent.MaxKubeSelector)
+		}
+		return "", phrase.Errorf("the label selector contains a control character")
 	}
 	return sel, nil
 }
 
-// count is an optional non-negative whole number, def when absent.
+// count is an optional non-negative whole number, def when absent. what is
+// "restarts" or "minutes", each of which has a sentence of its own.
 func (p kubeParams) count(key, what string, def int) (int, error) {
 	s := strings.TrimSpace(p.values.Get(key))
 	if s == "" {
@@ -302,7 +311,10 @@ func (p kubeParams) count(key, what string, def int) (int, error) {
 	}
 	var n int
 	if _, err := fmt.Sscan(s, &n); err != nil || n < 0 || fmt.Sprint(n) != s {
-		return 0, fmt.Errorf("%q is not a whole number of %s", s, what)
+		if what == "minutes" {
+			return 0, phrase.Errorf("{value} is not a whole number of minutes", "value", strconv.Quote(s))
+		}
+		return 0, phrase.Errorf("{value} is not a whole number of restarts", "value", strconv.Quote(s))
 	}
 	return n, nil
 }

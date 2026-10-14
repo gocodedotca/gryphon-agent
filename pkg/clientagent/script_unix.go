@@ -8,6 +8,8 @@ import (
 	"os"
 	"os/exec"
 	"syscall"
+
+	"github.com/gocodedotca/gryphon-agent/pkg/phrase"
 )
 
 // unsafePermissions says why a script or its directory must not be trusted,
@@ -19,17 +21,17 @@ import (
 func unsafePermissions(_ string, info os.FileInfo) string {
 	mode := info.Mode().Perm()
 	if mode&0o002 != 0 {
-		return "is writable by every user on this machine"
+		return phrase.T("is writable by every user on this machine")
 	}
 	st, ok := info.Sys().(*syscall.Stat_t)
 	if !ok {
 		return ""
 	}
 	if uid := int(st.Uid); uid != 0 && uid != os.Getuid() {
-		return fmt.Sprintf("is owned by uid %d, not root or the agent's user", uid)
+		return phrase.T("is owned by uid {uid}, not root or the agent's user", "uid", uid)
 	}
 	if mode&0o020 != 0 && int(st.Gid) != os.Getgid() && !inGroup(int(st.Gid)) {
-		return fmt.Sprintf("is writable by group %d, which the agent is not in", st.Gid)
+		return phrase.T("is writable by group {gid}, which the agent is not in", "gid", fmt.Sprint(st.Gid))
 	}
 	return ""
 }
@@ -51,7 +53,7 @@ func inGroup(gid int) bool {
 
 func executable(_ string, info os.FileInfo) bool { return info.Mode().Perm()&0o111 != 0 }
 
-const notExecutableHint = "chmod +x it"
+var notExecutableHint = phrase.Mark("chmod +x it")
 
 func scriptCommand(ctx context.Context, path string) *exec.Cmd {
 	return exec.CommandContext(ctx, path)

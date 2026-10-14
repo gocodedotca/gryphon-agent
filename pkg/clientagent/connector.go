@@ -19,6 +19,7 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/gocodedotca/gryphon-agent/pkg/agent"
+	"github.com/gocodedotca/gryphon-agent/pkg/phrase"
 	"github.com/gocodedotca/gryphon-agent/pkg/version"
 )
 
@@ -397,7 +398,7 @@ func (c *Connector) session(ctx context.Context, h *handlers, target string) (ti
 				// report.
 				_ = writeFrame(sctx, conn, resultFrame(f.ID, http.StatusOK, agent.Response{
 					Action: f.Check, OK: false, DateTime: time.Now(), NewStatusID: agent.StatusUnknown,
-					Status: "the agent is stopping", Version: version.Version(),
+					Status: phrase.T("the agent is stopping"), Version: version.Version(),
 				}))
 				continue
 			}
@@ -492,7 +493,7 @@ func (c *Connector) answer(ctx context.Context, h *handlers, f agent.Frame) (cod
 		if rec := recover(); rec != nil {
 			c.log.Error("panic answering the server", "check", f.Check, "panic", rec)
 			code, resp = http.StatusInternalServerError, agent.Response{
-				Action: f.Check, OK: false, Status: "internal error", DateTime: time.Now(),
+				Action: f.Check, OK: false, Status: phrase.T("internal error"), DateTime: time.Now(),
 				Version: version.Version(),
 			}
 		}

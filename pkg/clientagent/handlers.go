@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gocodedotca/gryphon-agent/pkg/agent"
+	"github.com/gocodedotca/gryphon-agent/pkg/phrase"
 	"github.com/gocodedotca/gryphon-agent/pkg/version"
 )
 
@@ -103,7 +104,7 @@ func measured(value float64, msg, data string) result {
 // unknownResult reports that the measurement itself failed — which is not the
 // same claim as "the thing measured is broken".
 func unknownResult(err error) result {
-	return result{statusID: agent.StatusUnknown, msg: "could not measure: " + err.Error()}
+	return result{statusID: agent.StatusUnknown, msg: phrase.T("could not measure: {err}", "err", err)}
 }
 
 // testResponse is the answer to a test: the agent is here, this is its build,
@@ -209,7 +210,8 @@ func runWithDeadline(ctx context.Context, action, params string, fn checkFunc, r
 			if rec := recover(); rec != nil {
 				done <- result{
 					statusID: agent.StatusUnknown,
-					msg:      fmt.Sprintf("the %s check failed unexpectedly: %v", action, rec),
+					msg: phrase.T("the {check} check failed unexpectedly: {panic}",
+						"check", action, "panic", fmt.Sprint(rec)),
 				}
 			}
 		}()
@@ -222,7 +224,8 @@ func runWithDeadline(ctx context.Context, action, params string, fn checkFunc, r
 	case <-ctx.Done():
 		return result{
 			statusID: agent.StatusUnknown,
-			msg:      fmt.Sprintf("the %s check did not finish within %s", action, checkDeadline),
+			msg: phrase.T("the {check} check did not finish within {deadline}",
+				"check", action, "deadline", checkDeadline),
 		}
 	}
 }
@@ -251,7 +254,7 @@ func (app *handlers) run(ctx context.Context, action, params string) (int, agent
 	default:
 		return http.StatusOK, agent.Response{
 			Action: action, OK: false, DateTime: time.Now(), NewStatusID: agent.StatusUnknown,
-			Status:  fmt.Sprintf("the agent is busy: %d checks are already running", app.cfg.MaxConcurrent),
+			Status:  phrase.T("the agent is busy: {n} checks are already running", "n", app.cfg.MaxConcurrent),
 			Version: version.Version(),
 		}
 	}

@@ -5,6 +5,7 @@ import (
 
 	"github.com/gocodedotca/gryphon-agent/pkg/agent"
 	"github.com/gocodedotca/gryphon-agent/pkg/netcheck"
+	"github.com/gocodedotca/gryphon-agent/pkg/phrase"
 )
 
 // Where this agent's checks may dial.
@@ -40,8 +41,14 @@ func (c Config) reach() netcheck.Reach {
 // It names the setting, because the person reading it off a dashboard in
 // Gryphon cannot see this machine's environment and would otherwise have
 // nothing to go on.
-const refusedMessage = "the agent only reaches addresses inside its own network " +
-	"(set GWC_ALLOW_PUBLIC_TARGETS on the agent to allow public ones)"
+var refusedMessage = phrase.T("the agent only reaches addresses inside its own network (set GWC_ALLOW_PUBLIC_TARGETS on the agent to allow public ones)")
+
+// refusedTarget is refusedMessage for a network check, which names what it
+// was pointed at first, as all of its messages do.
+func refusedTarget(target string) string {
+	return phrase.T("{target} - the agent only reaches addresses inside its own network (set GWC_ALLOW_PUBLIC_TARGETS on the agent to allow public ones)",
+		"target", target)
+}
 
 // refused is the answer to a check pointed somewhere the agent may not go.
 //

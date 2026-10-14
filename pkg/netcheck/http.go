@@ -3,6 +3,7 @@ package netcheck
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -14,6 +15,8 @@ import (
 	"time"
 
 	"github.com/gocodedotca/gryphon-agent/pkg/agent"
+	"github.com/gocodedotca/gryphon-agent/pkg/certificateutils"
+	"github.com/gocodedotca/gryphon-agent/pkg/phrase"
 )
 
 // HTTP methods a check may use. Enough for a health endpoint; a request body
@@ -46,10 +49,12 @@ type FetchSpec struct {
 	// own policy declining the address rather than the target failing. Such a
 	// fetch is unknown: the check is pointed somewhere it may not go.
 	Refused func(error) bool
-	// RefusedMessage replaces the wording of such a refusal. The agent says
-	// why in its own terms -- it is the operator's own network, and "this
-	// installation" is the wrong machine to name.
-	RefusedMessage string
+	// RefusedMessage, when set, writes the message for such a refusal of a
+	// fetch of target. The agent says why in its own terms -- it is the
+	// operator's own network, and "this installation" is the wrong machine to
+	// name. A function rather than a sentence, so the whole message is
+	// written from one format the catalogs hold (pkg/phrase).
+	RefusedMessage func(target string) string
 }
 
 // StatusSet is a list of accepted status codes and ranges.
@@ -80,13 +85,13 @@ func ParseStatusSet(s string) (StatusSet, error) {
 				return nil, err
 			}
 			if hi < lo {
-				return nil, fmt.Errorf("%s runs backwards", part)
+				return nil, phrase.Errorf("{range} runs backwards", "range", part)
 			}
 		}
 		set = append(set, statusRange{lo, hi})
 	}
 	if len(set) == 0 {
-		return nil, errors.New("no status codes given")
+		return nil, phrase.Errorf("no status codes given")
 	}
 	return set, nil
 }
@@ -94,7 +99,7 @@ func ParseStatusSet(s string) (StatusSet, error) {
 func statusCode(s string) (int, error) {
 	n, err := strconv.Atoi(strings.TrimSpace(s))
 	if err != nil || n < 100 || n > 599 {
-		return 0, fmt.Errorf("%q is not an HTTP status code (100 to 599)", strings.TrimSpace(s))
+		return 0, phrase.Errorf("{code} is not an HTTP status code (100 to 599)", "code", strconv.Quote(strings.TrimSpace(s)))
 	}
 	return n, nil
 }
@@ -145,7 +150,7 @@ func FetchWith(ctx context.Context, client *http.Client, url string, spec FetchS
 		method = http.MethodGet
 	}
 	if !slices.Contains(HTTPMethods, method) {
-		return unknown("%s - %s is not a method this check sends", url, method)
+		return unknown(phrase.T("{target} - {method} is not a method this check sends", "target", url, "method", method))
 	}
 	accept := spec.Accept
 	if accept == nil {
@@ -154,7 +159,7 @@ func FetchWith(ctx context.Context, client *http.Client, url string, spec FetchS
 
 	req, err := http.NewRequestWithContext(ctx, method, url, nil)
 	if err != nil {
-		return unknown("%s - could not build request: %v", url, err)
+		return unknown(phrase.T("{target} - could not build request: {err}", "target", url, "err", err))
 	}
 	req.Header.Set("User-Agent", "Gryphon")
 
@@ -162,21 +167,30 @@ func FetchWith(ctx context.Context, client *http.Client, url string, spec FetchS
 	resp, err := client.Do(req)
 	if err != nil {
 		if ctx.Err() != nil {
-			return unknown("%s - check cancelled or timed out", url)
+			return unknown(phrase.T("{target} - check cancelled or timed out", "target", url))
 		}
 		if spec.Refused != nil && spec.Refused(err) {
 			// Without the underlying error, which can name this server's own
 			// network, for the reason given on the database checks.
-			if spec.RefusedMessage != "" {
-				return unknown("%s - %s", url, spec.RefusedMessage)
+			if spec.RefusedMessage != nil {
+				return unknown(spec.RefusedMessage(url))
 			}
-			return unknown("%s - this installation does not allow checks to reach that address", url)
+			return unknown(phrase.T("{target} - this installation does not allow checks to reach that address", "target", url))
 		}
 		var dnsErr *net.DNSError
 		if errors.As(err, &dnsErr) && (dnsErr.IsTemporary || dnsErr.IsTimeout) {
-			return unknown("%s - name server did not answer: %v", url, err)
+			return unknown(phrase.T("{target} - name server did not answer: {err}", "target", url, "err", err))
 		}
-		return problem("%s - error connecting: %v", url, err)
+		// A certificate refused, said in the terms of what to fix — above
+		// all a server not sending its intermediate, which browsers paper
+		// over and Go does not, so the site looks up to everyone who checks
+		// it by hand. ExplainFor writes the whole message, from formats of
+		// its own, so that it is translated when it is shown.
+		var refused *tls.CertificateVerificationError
+		if errors.As(err, &refused) {
+			return problem(certificateutils.ExplainFor(url, refused.Err, refused.UnverifiedCertificates))
+		}
+		return problem(phrase.T("{target} - error connecting: {err}", "target", url, "err", err))
 	}
 	defer func() {
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
@@ -187,9 +201,11 @@ func FetchWith(ctx context.Context, client *http.Client, url string, spec FetchS
 
 	if !accept.Accepts(resp.StatusCode) {
 		if accept.String() != DefaultAcceptedStatus {
-			return problem("%s - %s (accepted: %s)", url, resp.Status, accept)
+			return problem(phrase.T("{target} - {status} (accepted: {accepted})", "target", url, "status", resp.Status, "accepted", accept))
 		}
-		return problem("%s - %s", url, resp.Status)
+		// The server's status line and nothing of ours, so nothing to
+		// translate: written as it is rather than from a format.
+		return problem(url + " - " + resp.Status)
 	}
 
 	if spec.Contains != "" {
@@ -199,22 +215,27 @@ func FetchWith(ctx context.Context, client *http.Client, url string, spec FetchS
 		body, err := io.ReadAll(io.LimitReader(resp.Body, MaxBodySearch))
 		if err != nil {
 			if ctx.Err() != nil {
-				return unknown("%s - check cancelled or timed out", url)
+				return unknown(phrase.T("{target} - check cancelled or timed out", "target", url))
 			}
-			return problem("%s - %s, but the response could not be read: %v", url, resp.Status, err)
+			return problem(phrase.T("{target} - {status}, but the response could not be read: {err}", "target", url, "status", resp.Status, "err", err))
 		}
 		if !bytes.Contains(body, []byte(spec.Contains)) {
 			if len(body) == MaxBodySearch {
-				return problem("%s - %s, but the first 256 KB of the response did not contain %q", url, resp.Status, spec.Contains)
+				return problem(phrase.T("{target} - {status}, but the first 256 KB of the response did not contain {text}",
+					"target", url, "status", resp.Status, "text", strconv.Quote(spec.Contains)))
 			}
-			return problem("%s - %s, but the response did not contain %q", url, resp.Status, spec.Contains)
+			return problem(phrase.T("{target} - {status}, but the response did not contain {text}",
+				"target", url, "status", resp.Status, "text", strconv.Quote(spec.Contains)))
 		}
 		rtt = time.Since(start)
 	}
 
+	// Not from a format: "{target} - {status} in {rtt}" has too little text
+	// of its own to recognise a message by (see i18n.ResultFormatProblem), and
+	// what it says beyond the server's status line is a number.
 	return Outcome{
 		Status:  agent.StatusHealthy,
-		Message: fmt.Sprintf("%s - %s in %s", url, resp.Status, RoundRTT(rtt)),
+		Message: phrase.T("{target} - {status} in {rtt}", "target", url, "status", resp.Status, "rtt", RoundRTT(rtt)),
 		RTT:     rtt,
 	}
 }
@@ -228,7 +249,7 @@ func ParseFetchSpec(get func(string) string) (FetchSpec, error) {
 		Contains: get(agent.ParamContains),
 	}
 	if spec.Method != "" && !slices.Contains(HTTPMethods, spec.Method) {
-		return spec, fmt.Errorf("%s is not a method this check sends", spec.Method)
+		return spec, phrase.Errorf("{method} is not a method this check sends", "method", spec.Method)
 	}
 	accept, err := ParseStatusSet(get(agent.ParamStatus))
 	if err != nil {
@@ -236,7 +257,7 @@ func ParseFetchSpec(get func(string) string) (FetchSpec, error) {
 	}
 	spec.Accept = accept
 	if spec.Method == http.MethodHead && spec.Contains != "" {
-		return spec, errors.New("a HEAD request has no body to search")
+		return spec, phrase.Errorf("a HEAD request has no body to search")
 	}
 	return spec, nil
 }

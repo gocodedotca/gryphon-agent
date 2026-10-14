@@ -10,6 +10,7 @@ import (
 
 	probing "github.com/prometheus-community/pro-bing"
 	"github.com/gocodedotca/gryphon-agent/pkg/agent"
+	"github.com/gocodedotca/gryphon-agent/pkg/phrase"
 )
 
 // Pinger reports whether a host answers.
@@ -42,9 +43,9 @@ type Pinger struct {
 	// to the name, so a second lookup cannot answer differently.
 	Permit func(netip.Addr) error
 	Dialer *net.Dialer
-	// RefusedMessage replaces the wording of a refusal by Permit, for the
-	// same reason FetchSpec.RefusedMessage does.
-	RefusedMessage string
+	// RefusedMessage, when set, writes the message for a refusal by Permit of
+	// a ping to target, for the same reason FetchSpec.RefusedMessage does.
+	RefusedMessage func(target string) string
 }
 
 // Ping checks host, which may be a name or an address.
@@ -57,13 +58,13 @@ func (p Pinger) Ping(ctx context.Context, host string) Outcome {
 	if p.Permit != nil {
 		ip, parsed := netip.AddrFromSlice(addr)
 		if !parsed {
-			return unknown("%s - cannot read the resolved address %s", host, addr)
+			return unknown(phrase.T("{target} - cannot read the resolved address {addr}", "target", host, "addr", addr.String()))
 		}
 		if err := p.Permit(ip.Unmap()); err != nil {
-			if p.RefusedMessage != "" {
-				return unknown("%s - %s", host, p.RefusedMessage)
+			if p.RefusedMessage != nil {
+				return unknown(p.RefusedMessage(host))
 			}
-			return unknown("%s - this installation does not allow checks to reach that address", host)
+			return unknown(phrase.T("{target} - this installation does not allow checks to reach that address", "target", host))
 		}
 	}
 
@@ -73,12 +74,13 @@ func (p Pinger) Ping(ctx context.Context, host string) Outcome {
 		// unprivileged container, and it says nothing whatsoever about the
 		// target — so fall back to TCP rather than reporting a false outage.
 		if ctx.Err() != nil {
-			return unknown("%s - check cancelled or timed out", host)
+			return unknown(phrase.T("{target} - check cancelled or timed out", "target", host))
 		}
 		if port, alive := p.tcpProbe(ctx, host); alive {
-			return healthy("%s - reachable on tcp/%d (ICMP unavailable to this host: %v)", host, port, err)
+			return healthy(phrase.T("{target} - reachable on tcp/{port} (ICMP unavailable to this host: {err})",
+				"target", host, "port", port, "err", err))
 		}
-		return unknown("%s - cannot send ICMP and no TCP fallback succeeded: %v", host, err)
+		return unknown(phrase.T("{target} - cannot send ICMP and no TCP fallback succeeded: {err}", "target", host, "err", err))
 	}
 
 	loss := stats.PacketLoss / 100
@@ -88,23 +90,23 @@ func (p Pinger) Ping(ctx context.Context, host string) Outcome {
 		// No echo replies. That is often a filtered ICMP rather than a dead
 		// host, so ask TCP before calling it an outage.
 		if port, alive := p.tcpProbe(ctx, host); alive {
-			return healthy("%s - no ICMP reply (filtered), but answering on tcp/%d", host, port)
+			return healthy(phrase.T("{target} - no ICMP reply (filtered), but answering on tcp/{port}", "target", host, "port", port))
 		}
-		return problem("%s - unreachable: %d/%d packets lost, no TCP response",
-			host, stats.PacketsSent, stats.PacketsSent)
+		return problem(phrase.T("{target} - unreachable: {lost}/{sent} packets lost, no TCP response",
+			"target", host, "lost", stats.PacketsSent, "sent", stats.PacketsSent))
 
 	case loss > p.LossWarning:
 		return Outcome{
 			Status: agent.StatusWarning,
-			Message: fmt.Sprintf("%s - degraded: %.0f%% packet loss, %s average",
-				host, stats.PacketLoss, RoundRTT(stats.AvgRtt)),
+			Message: phrase.T("{target} - degraded: {loss} packet loss, {rtt} average",
+				"target", host, "loss", fmt.Sprintf("%.0f%%", stats.PacketLoss), "rtt", RoundRTT(stats.AvgRtt)),
 			RTT: stats.AvgRtt,
 		}
 
 	default:
 		return Outcome{
 			Status:  agent.StatusHealthy,
-			Message: fmt.Sprintf("%s - responded to ping in %s", host, RoundRTT(stats.AvgRtt)),
+			Message: phrase.T("{target} - responded to ping in {rtt}", "target", host, "rtt", RoundRTT(stats.AvgRtt)),
 			RTT:     stats.AvgRtt,
 		}
 	}
@@ -127,7 +129,7 @@ func (p Pinger) icmp(ctx context.Context, addr string) (*probing.Statistics, err
 	if err == nil {
 		return stats, nil
 	}
-	return nil, fmt.Errorf("unprivileged: %v; privileged: %v", unprivErr, err)
+	return nil, phrase.Errorf("unprivileged: {first}; privileged: {second}", "first", unprivErr, "second", err)
 }
 
 func (p Pinger) runPinger(ctx context.Context, addr string, privileged bool) (*probing.Statistics, error) {
@@ -146,7 +148,7 @@ func (p Pinger) runPinger(ctx context.Context, addr string, privileged bool) (*p
 
 	stats := pinger.Statistics()
 	if stats.PacketsSent == 0 {
-		return nil, errors.New("no packets were sent")
+		return nil, phrase.Errorf("no packets were sent")
 	}
 	return stats, nil
 }
@@ -209,16 +211,16 @@ func resolveHost(ctx context.Context, host string) (net.IP, Outcome, bool) {
 		var dnsErr *net.DNSError
 		if errors.As(err, &dnsErr) {
 			if dnsErr.IsTemporary || dnsErr.IsTimeout {
-				return nil, unknown("%s - name server did not answer: %v", host, err), false
+				return nil, unknown(phrase.T("{target} - name server did not answer: {err}", "target", host, "err", err)), false
 			}
 			if dnsErr.IsNotFound {
-				return nil, problem("%s - name does not resolve", host), false
+				return nil, problem(phrase.T("{target} - name does not resolve", "target", host)), false
 			}
 		}
-		return nil, unknown("%s - could not resolve name: %v", host, err), false
+		return nil, unknown(phrase.T("{target} - could not resolve name: {err}", "target", host, "err", err)), false
 	}
 	if len(addrs) == 0 {
-		return nil, problem("%s - name resolved to no addresses", host), false
+		return nil, problem(phrase.T("{target} - name resolved to no addresses", "target", host)), false
 	}
 
 	// Prefer IPv4, but accept IPv6 — the old code asked for "ip4:icmp" and so

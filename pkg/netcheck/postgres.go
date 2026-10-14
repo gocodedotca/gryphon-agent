@@ -4,12 +4,14 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"io"
 	"net"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/gocodedotca/gryphon-agent/pkg/phrase"
 )
 
 // The Postgres check that does not sign in.
@@ -91,7 +93,7 @@ func PostgresHandshake(ctx context.Context, dial DialFunc, t PostgresTarget) (ti
 	}
 	host := strings.TrimSpace(t.Host)
 	if host == "" {
-		return 0, errors.New("no address to connect to")
+		return 0, phrase.Errorf("no address to connect to")
 	}
 
 	started := time.Now()
@@ -121,7 +123,7 @@ func PostgresHandshake(ctx context.Context, dial DialFunc, t PostgresTarget) (ti
 	}
 
 	if err := writeStartup(conn); err != nil {
-		return 0, fmt.Errorf("cannot send a startup message: %w", err)
+		return 0, phrase.Errorf("cannot send a startup message: {err}", "err", err)
 	}
 	typ, body, err := readMessage(conn)
 	if err != nil {
@@ -137,7 +139,7 @@ func PostgresHandshake(ctx context.Context, dial DialFunc, t PostgresTarget) (ti
 	case 'E':
 		return rtt, judgeError(body)
 	default:
-		return 0, fmt.Errorf("unexpected reply %q to a startup message; is this Postgres?", typ)
+		return 0, phrase.Errorf("unexpected reply {reply} to a startup message; is this Postgres?", "reply", strconv.QuoteRune(rune(typ)))
 	}
 }
 
@@ -152,12 +154,12 @@ func negotiateTLS(ctx context.Context, raw net.Conn, host string, required bool)
 	binary.BigEndian.PutUint32(msg[0:4], 8)
 	binary.BigEndian.PutUint32(msg[4:8], 80877103) // SSLRequest code
 	if _, err := raw.Write(msg[:]); err != nil {
-		return nil, nil, fmt.Errorf("cannot send an SSL request: %w", err)
+		return nil, nil, phrase.Errorf("cannot send an SSL request: {err}", "err", err)
 	}
 
 	var answer [1]byte
 	if _, err := io.ReadFull(raw, answer[:]); err != nil {
-		return nil, nil, fmt.Errorf("no answer to an SSL request: %w", err)
+		return nil, nil, phrase.Errorf("no answer to an SSL request: {err}", "err", err)
 	}
 
 	switch answer[0] {
@@ -171,12 +173,12 @@ func negotiateTLS(ctx context.Context, raw net.Conn, host string, required bool)
 			InsecureSkipVerify: true, //nolint:gosec // see above
 		})
 		if err := tlsConn.HandshakeContext(ctx); err != nil {
-			return nil, nil, fmt.Errorf("TLS handshake failed: %w", err)
+			return nil, nil, phrase.Errorf("TLS handshake failed: {err}", "err", err)
 		}
 		return tlsConn, nil, nil
 	case 'N':
 		if required {
-			return nil, nil, errors.New("the server does not support SSL, and the check requires it")
+			return nil, nil, phrase.Errorf("the server does not support SSL, and the check requires it")
 		}
 		return raw, nil, nil
 	case 'E':
@@ -185,11 +187,11 @@ func negotiateTLS(ctx context.Context, raw net.Conn, host string, required bool)
 			return nil, nil, err
 		}
 		if required {
-			return nil, nil, fmt.Errorf("the server refused the SSL request: %s", errorMessage(body))
+			return nil, nil, phrase.Errorf("the server refused the SSL request: {reason}", "reason", errorMessage(body))
 		}
 		return nil, body, nil
 	default:
-		return nil, nil, fmt.Errorf("unexpected reply %q to an SSL request; is this Postgres?", answer[0])
+		return nil, nil, phrase.Errorf("unexpected reply {reply} to an SSL request; is this Postgres?", "reply", strconv.QuoteRune(rune(answer[0])))
 	}
 }
 
@@ -233,7 +235,7 @@ const maxMessage = 64 << 10
 func readMessage(conn net.Conn) (byte, []byte, error) {
 	var typ [1]byte
 	if _, err := io.ReadFull(conn, typ[:]); err != nil {
-		return 0, nil, fmt.Errorf("no answer to a startup message: %w", err)
+		return 0, nil, phrase.Errorf("no answer to a startup message: {err}", "err", err)
 	}
 	body, err := readBody(conn)
 	if err != nil {
@@ -247,15 +249,15 @@ func readMessage(conn net.Conn) (byte, []byte, error) {
 func readBody(conn net.Conn) ([]byte, error) {
 	var lenBuf [4]byte
 	if _, err := io.ReadFull(conn, lenBuf[:]); err != nil {
-		return nil, fmt.Errorf("truncated reply: %w", err)
+		return nil, phrase.Errorf("truncated reply: {err}", "err", err)
 	}
 	length := binary.BigEndian.Uint32(lenBuf[:])
 	if length < 4 || length > maxMessage {
-		return nil, fmt.Errorf("reply of %d bytes is not a Postgres message", length)
+		return nil, phrase.Errorf("reply of {n} bytes is not a Postgres message", "n", fmt.Sprint(length))
 	}
 	body := make([]byte, length-4)
 	if _, err := io.ReadFull(conn, body); err != nil {
-		return nil, fmt.Errorf("truncated reply: %w", err)
+		return nil, phrase.Errorf("truncated reply: {err}", "err", err)
 	}
 	return body, nil
 }
@@ -299,7 +301,7 @@ func judgeError(body []byte) error {
 	f := errorFields(body)
 	code := f['C']
 	if code == "" {
-		return errors.New("an error reply with no SQLSTATE; is this Postgres?")
+		return phrase.Errorf("an error reply with no SQLSTATE; is this Postgres?")
 	}
 	// Class 57 is operator intervention: starting up, shutting down, in
 	// recovery, cannot connect now. Class 53 is insufficient resources: too

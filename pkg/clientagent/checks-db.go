@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/gocodedotca/gryphon-agent/pkg/agent"
 	"github.com/gocodedotca/gryphon-agent/pkg/netcheck"
+	"github.com/gocodedotca/gryphon-agent/pkg/phrase"
 )
 
 const dbTimeout = 10 * time.Second
@@ -35,7 +36,7 @@ const dbTimeout = 10 * time.Second
 // netcheck.PostgresHandshake for what it proves and what it does not.
 func (n *netProbe) checkPostgres(ctx context.Context, dsn string) result {
 	if strings.TrimSpace(dsn) == "" {
-		return result{statusID: agent.StatusUnknown, msg: "no connection string configured"}
+		return result{statusID: agent.StatusUnknown, msg: phrase.T("no connection string configured")}
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, dbTimeout)
@@ -48,7 +49,7 @@ func (n *netProbe) checkPostgres(ctx context.Context, dsn string) result {
 
 	cfg, err := pgx.ParseConfig(stripFileParams(dsn))
 	if err != nil {
-		return result{statusID: agent.StatusUnknown, msg: "cannot read the postgres connection string: " + err.Error()}
+		return result{statusID: agent.StatusUnknown, msg: phrase.T("cannot read the postgres connection string: {err}", "err", err)}
 	}
 	cfg.DialFunc = func(ctx context.Context, network, addr string) (net.Conn, error) {
 		return n.dial(ctx, network, addr)
@@ -59,14 +60,14 @@ func (n *netProbe) checkPostgres(ctx context.Context, dsn string) result {
 		if netcheck.Blocked(err) {
 			return refused()
 		}
-		return result{statusID: agent.StatusProblem, msg: "cannot reach postgres: " + err.Error()}
+		return result{statusID: agent.StatusProblem, msg: cannotReach("postgres", err)}
 	}
 	defer func() { _ = conn.Close(context.WithoutCancel(ctx)) }()
 
 	if err := conn.Ping(ctx); err != nil {
-		return result{statusID: agent.StatusProblem, msg: "cannot reach postgres: " + err.Error()}
+		return result{statusID: agent.StatusProblem, msg: cannotReach("postgres", err)}
 	}
-	return result{statusID: agent.StatusHealthy, msg: "pinged postgres successfully"}
+	return result{statusID: agent.StatusHealthy, msg: phrase.T("pinged {db} successfully", "db", "postgres")}
 }
 
 // checkMariaDB is checkPostgres for the other engine: a DSN naming a user is
@@ -77,11 +78,11 @@ func (n *netProbe) checkMariaDB(ctx context.Context, dsn string) result {
 	if err != nil {
 		// A DSN the driver cannot read is reported in the driver's own words,
 		// the same as before this check had two modes.
-		return result{statusID: agent.StatusProblem, msg: "cannot open mariadb: " + err.Error()}
+		return result{statusID: agent.StatusProblem, msg: phrase.T("cannot open mariadb: {err}", "err", err)}
 	}
 	host, port, err := net.SplitHostPort(cfg.Addr)
 	if err != nil {
-		return result{statusID: agent.StatusUnknown, msg: "cannot read the mariadb address: " + err.Error()}
+		return result{statusID: agent.StatusUnknown, msg: phrase.T("cannot read the mariadb address: {err}", "err", err)}
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, dbTimeout)
@@ -97,14 +98,14 @@ func (n *netProbe) checkMariaDB(ctx context.Context, dsn string) result {
 	cfg.Net = n.mysqlNetwork
 	conn, err := mysql.NewConnector(cfg)
 	if err != nil {
-		return result{statusID: agent.StatusProblem, msg: "cannot open mariadb: " + err.Error()}
+		return result{statusID: agent.StatusProblem, msg: phrase.T("cannot open mariadb: {err}", "err", err)}
 	}
 	raw, err := conn.Connect(ctx)
 	if err != nil {
 		if netcheck.Blocked(err) {
 			return refused()
 		}
-		return result{statusID: agent.StatusProblem, msg: "cannot reach mariadb: " + err.Error()}
+		return result{statusID: agent.StatusProblem, msg: cannotReach("mariadb", err)}
 	}
 	defer func() { _ = raw.Close() }()
 
@@ -112,12 +113,12 @@ func (n *netProbe) checkMariaDB(ctx context.Context, dsn string) result {
 	// sql.Open path used to send, and what proves the server is serving.
 	pinger, ok := raw.(driver.Pinger)
 	if !ok {
-		return result{statusID: agent.StatusUnknown, msg: "the mariadb driver cannot ping"}
+		return result{statusID: agent.StatusUnknown, msg: phrase.T("the mariadb driver cannot ping")}
 	}
 	if err := pinger.Ping(ctx); err != nil {
-		return result{statusID: agent.StatusProblem, msg: "cannot reach mariadb: " + err.Error()}
+		return result{statusID: agent.StatusProblem, msg: cannotReach("mariadb", err)}
 	}
-	return result{statusID: agent.StatusHealthy, msg: "pinged mariadb successfully"}
+	return result{statusID: agent.StatusHealthy, msg: phrase.T("pinged {db} successfully", "db", "mariadb")}
 }
 
 // handshakeResult turns a credential-free handshake into the agent's answer.
@@ -129,13 +130,14 @@ func (n *netProbe) handshakeResult(what string, rtt time.Duration, version strin
 	case errors.As(err, &refusal):
 		// The server's own sentence: starting up, in recovery, out of
 		// connections. It answered, so this is not "cannot reach".
-		return result{statusID: agent.StatusProblem, msg: what + " is not accepting connections: " + refusal.Error()}
+		return result{statusID: agent.StatusProblem,
+			msg: phrase.T("{db} is not accepting connections: {reason}", "db", what, "reason", refusal)}
 	case err != nil:
-		return result{statusID: agent.StatusProblem, msg: "cannot reach " + what + ": " + err.Error()}
+		return result{statusID: agent.StatusProblem, msg: cannotReach(what, err)}
 	}
-	msg := what + " is accepting connections"
+	msg := phrase.T("{db} is accepting connections", "db", what)
 	if version != "" {
-		msg += " (" + version + ")"
+		msg = phrase.T("{db} is accepting connections ({version})", "db", what, "version", version)
 	}
 	return result{statusID: agent.StatusHealthy, msg: msg, rtt: rtt}
 }
@@ -147,7 +149,7 @@ func (n *netProbe) handshakeResult(what string, rtt time.Duration, version strin
 // for as long as the connection lives.
 func (n *netProbe) checkRedis(ctx context.Context, addr string) result {
 	if strings.TrimSpace(addr) == "" {
-		return result{statusID: agent.StatusUnknown, msg: "no address configured"}
+		return result{statusID: agent.StatusUnknown, msg: phrase.T("no address configured")}
 	}
 
 	opts := []redis.DialOption{
@@ -170,16 +172,22 @@ func (n *netProbe) checkRedis(ctx context.Context, addr string) result {
 		if netcheck.Blocked(err) {
 			return refused()
 		}
-		return result{statusID: agent.StatusProblem, msg: "cannot reach redis: " + err.Error()}
+		return result{statusID: agent.StatusProblem, msg: cannotReach("redis", err)}
 	}
 	defer conn.Close()
 
 	// The old client called a successful TCP connect a healthy redis; PING is
 	// what proves the server is actually serving.
 	if _, err := redis.String(redis.DoContext(conn, ctx, "PING")); err != nil {
-		return result{statusID: agent.StatusProblem, msg: "redis did not answer PING: " + err.Error()}
+		return result{statusID: agent.StatusProblem, msg: phrase.T("redis did not answer PING: {err}", "err", err)}
 	}
-	return result{statusID: agent.StatusHealthy, msg: "pinged redis successfully"}
+	return result{statusID: agent.StatusHealthy, msg: phrase.T("pinged {db} successfully", "db", "redis")}
+}
+
+// cannotReach is the message for a database the check could not get an
+// answer from.
+func cannotReach(db string, err error) string {
+	return phrase.T("cannot reach {db}: {err}", "db", db, "err", err)
 }
 
 // registerMySQLNetwork installs this probe's dialer with the MySQL driver and

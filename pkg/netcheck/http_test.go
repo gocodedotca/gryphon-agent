@@ -2,7 +2,17 @@ package netcheck
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"errors"
+	"io"
+	"log"
+	"math/big"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -109,5 +119,80 @@ func TestParseFetchSpec(t *testing.T) {
 	spec, err := ParseFetchSpec(func(k string) string { return values[k] })
 	if err != nil || spec.Accept.String() != DefaultAcceptedStatus || spec.Method != "" {
 		t.Errorf("absent settings = %+v, %v; want the defaults", spec, err)
+	}
+}
+
+// A server sending its certificate with someone else's intermediate — stu.ca's
+// shape: a Let's Encrypt certificate, and a GeoTrust intermediate left over
+// from the certificate before it. Browsers fetch the missing intermediate; Go
+// refuses, and the check has to say why in words that point at the site.
+func TestFetchSaysWhichIntermediateIsMissing(t *testing.T) {
+	now := time.Now()
+	key := func() *ecdsa.PrivateKey {
+		k, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return k
+	}
+	serial := int64(1)
+	issue := func(tmpl *x509.Certificate, parent *x509.Certificate, parentKey, k *ecdsa.PrivateKey) *x509.Certificate {
+		serial++
+		tmpl.SerialNumber = big.NewInt(serial)
+		tmpl.NotBefore, tmpl.NotAfter = now.Add(-time.Hour), now.Add(24*time.Hour)
+		if parent == nil {
+			parent, parentKey = tmpl, k
+		}
+		der, err := x509.CreateCertificate(rand.Reader, tmpl, parent, &k.PublicKey, parentKey)
+		if err != nil {
+			t.Fatal(err)
+		}
+		c, err := x509.ParseCertificate(der)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c
+	}
+	ca := func(name string) *x509.Certificate {
+		return &x509.Certificate{Subject: pkix.Name{CommonName: name}, IsCA: true, BasicConstraintsValid: true,
+			KeyUsage: x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature}
+	}
+
+	rootKey, interKey, oldKey, leafKey := key(), key(), key(), key()
+	root := issue(ca("ISRG Root"), nil, nil, rootKey)
+	inter := issue(ca("YE1"), root, rootKey, interKey)
+	stale := issue(ca("GeoTrust TLS RSA CA G1"), nil, nil, oldKey)
+	leaf := issue(&x509.Certificate{
+		Subject: pkix.Name{CommonName: "stu.ca"}, IPAddresses: []net.IP{net.ParseIP("127.0.0.1")},
+		IssuingCertificateURL: []string{"http://ye1.i.lencr.org/"},
+		KeyUsage:              x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}, inter, interKey, leafKey)
+
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	srv.TLS = &tls.Config{Certificates: []tls.Certificate{{Certificate: [][]byte{leaf.Raw, stale.Raw}, PrivateKey: leafKey}}}
+	// The refusal is the point; the server's log of it is noise.
+	srv.Config.ErrorLog = log.New(io.Discard, "", 0)
+	srv.StartTLS()
+	defer srv.Close()
+
+	roots := x509.NewCertPool()
+	roots.AddCert(root)
+	client := &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: roots}}}
+
+	got := Fetch(context.Background(), client, srv.URL)
+	if got.Status != agent.StatusProblem {
+		t.Fatalf("status %v, want a problem: %q", got.Status, got.Message)
+	}
+	for _, want := range []string{
+		"not sending the intermediate certificate that issued its certificate (YE1)",
+		"sends GeoTrust TLS RSA CA G1 instead",
+		"fullchain.pem",
+	} {
+		if !strings.Contains(got.Message, want) {
+			t.Errorf("message %q does not say %q", got.Message, want)
+		}
+	}
+	if strings.Contains(got.Message, "x509:") {
+		t.Errorf("message %q still passes Go's own error through", got.Message)
 	}
 }

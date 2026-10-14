@@ -9,6 +9,8 @@ import (
 	"github.com/shirou/gopsutil/v4/disk"
 	"github.com/shirou/gopsutil/v4/load"
 	"github.com/shirou/gopsutil/v4/mem"
+
+	"github.com/gocodedotca/gryphon-agent/pkg/phrase"
 )
 
 // The four system checks are sensors: each reports a number and says nothing
@@ -43,11 +45,12 @@ func checkDisk(path string) result {
 		value = u.InodesUsedPercent
 	}
 
-	msg := fmt.Sprintf("%s: %.1f%% used, %s free of %s",
-		path, u.UsedPercent, humanBytes(u.Free), humanBytes(u.Total))
+	msg := phrase.T("{path}: {pct} used, {free} free of {total}",
+		"path", path, "pct", percent(u.UsedPercent), "free", humanBytes(u.Free), "total", humanBytes(u.Total))
 	if inodes {
-		msg = fmt.Sprintf("%s: inodes %.1f%% used (blocks %.1f%%, %s free of %s)",
-			path, u.InodesUsedPercent, u.UsedPercent, humanBytes(u.Free), humanBytes(u.Total))
+		msg = phrase.T("{path}: inodes {pct} used (blocks {blocks}, {free} free of {total})",
+			"path", path, "pct", percent(u.InodesUsedPercent), "blocks", percent(u.UsedPercent),
+			"free", humanBytes(u.Free), "total", humanBytes(u.Total))
 	}
 
 	return measured(value, msg, fmt.Sprintf("%d|%d", u.Free/(1<<20), u.Total/(1<<20)))
@@ -60,8 +63,8 @@ func checkMemory() result {
 	}
 	return measured(
 		m.UsedPercent,
-		fmt.Sprintf("memory: %.1f%% used, %s available of %s",
-			m.UsedPercent, humanBytes(m.Available), humanBytes(m.Total)),
+		phrase.T("memory: {pct} used, {available} available of {total}",
+			"pct", percent(m.UsedPercent), "available", humanBytes(m.Available), "total", humanBytes(m.Total)),
 		fmt.Sprintf("%d|%d|%d", m.Total/1024, m.Used/1024, m.Free/1024))
 }
 
@@ -88,7 +91,7 @@ var sampleCPU = func() (float64, error) {
 		return 0, err
 	}
 	if len(pct) == 0 {
-		return 0, fmt.Errorf("no cpu sample")
+		return 0, phrase.Errorf("no cpu sample")
 	}
 	return pct[0], nil
 }
@@ -107,8 +110,11 @@ func checkCPU() result {
 	if err != nil || n == 0 {
 		n = 1
 	}
-	return measured(cpuSample.value,
-		fmt.Sprintf("CPU: %.1f%% average across %d cpus", cpuSample.value, n), "")
+	msg := phrase.T("CPU: {pct} average across {n} cpus", "pct", percent(cpuSample.value), "n", n)
+	if n == 1 {
+		msg = phrase.T("CPU: {pct} average across 1 cpu", "pct", percent(cpuSample.value))
+	}
+	return measured(cpuSample.value, msg, "")
 }
 
 func checkLoad() result {
@@ -121,10 +127,19 @@ func checkLoad() result {
 		n = 1
 	}
 	perCPU := avg.Load1 / float64(n)
-	return measured(perCPU,
-		fmt.Sprintf("load: %.2f, %.2f, %.2f across %d cpus (%.2f per cpu)",
-			avg.Load1, avg.Load5, avg.Load15, n, perCPU), "")
+	two := func(f float64) string { return fmt.Sprintf("%.2f", f) }
+	msg := phrase.T("load: {one}, {five}, {fifteen} across {n} cpus ({per} per cpu)",
+		"one", two(avg.Load1), "five", two(avg.Load5), "fifteen", two(avg.Load15), "n", n, "per", two(perCPU))
+	if n == 1 {
+		msg = phrase.T("load: {one}, {five}, {fifteen} across 1 cpu ({per} per cpu)",
+			"one", two(avg.Load1), "five", two(avg.Load5), "fifteen", two(avg.Load15), "per", two(perCPU))
+	}
+	return measured(perCPU, msg, "")
 }
+
+// percent is a percentage as a message carries it: one decimal, and the sign
+// with it, so that a reader's language can space it its own way.
+func percent(f float64) string { return fmt.Sprintf("%.1f%%", f) }
 
 // humanBytes renders a byte count at a sensible scale.
 func humanBytes(b uint64) string {

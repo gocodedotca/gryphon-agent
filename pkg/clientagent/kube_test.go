@@ -428,7 +428,11 @@ func TestPods(t *testing.T) {
 		msg    []string
 	}{
 		{"quiet", "namespace=shop", []any{pod("web-1", "Running", container("app", 0, "", time.Time{}))},
-			agent.StatusHealthy, []string{"1 pods, none crash-looping"}},
+			agent.StatusHealthy, []string{"namespace shop: 1 pod, not crash-looping"}},
+		{"quiet, several", "namespace=shop", []any{
+			pod("web-1", "Running", container("app", 0, "", time.Time{})),
+			pod("web-2", "Running", container("app", 0, "", time.Time{})),
+		}, agent.StatusHealthy, []string{"namespace shop: 2 pods, none crash-looping"}},
 		{"crash loop", "namespace=shop", []any{
 			pod("web-1", "Running", container("app", 14, "CrashLoopBackOff", now.Add(-time.Minute))),
 			pod("web-2", "Running", container("app", 0, "", time.Time{})),
@@ -444,7 +448,7 @@ func TestPods(t *testing.T) {
 		{"cannot pull", "namespace=shop", []any{pod("web-1", "Pending", container("app", 0, "ImagePullBackOff", time.Time{}))},
 			agent.StatusProblem, []string{"ImagePullBackOff"}},
 		{"restarting recently", "namespace=shop", []any{pod("web-1", "Running", container("app", 9, "", now.Add(-10*time.Minute)))},
-			agent.StatusWarning, []string{"web-1/app 9 restarts, last 10m ago"}},
+			agent.StatusWarning, []string{"namespace shop: 1 pod, restarting often: web-1/app 9 restarts, last 10m ago"}},
 		{"old restarts are history", "namespace=shop", []any{pod("web-1", "Running", container("app", 40, "", now.Add(-72*time.Hour)))},
 			agent.StatusHealthy, nil},
 		{"a wider window catches them", "namespace=shop&window=10000", []any{pod("web-1", "Running", container("app", 40, "", now.Add(-72*time.Hour)))},
@@ -498,7 +502,13 @@ func TestCronJob(t *testing.T) {
 		{"on time", cronJob("0 2 * * *", "", created, ptr(day(6, 2, 5)), 0, false), day(6, 12, 0),
 			agent.StatusHealthy, []string{"last succeeded 9h 55m ago", "next run 2026-10-07 02:00 UTC"}},
 		{"due but within grace", cronJob("0 2 * * *", "", created, ptr(day(5, 2, 5)), 0, false), day(6, 2, 1),
-			agent.StatusHealthy, nil},
+			agent.StatusHealthy, []string{"backup: last succeeded 23h 56m ago; the run due 2026-10-06 02:00 UTC has not succeeded yet"}},
+		{"running within grace", cronJob("0 2 * * *", "", created, ptr(day(5, 2, 5)), 1, false), day(6, 2, 1),
+			agent.StatusHealthy, []string{"backup: last succeeded 23h 56m ago; the run due 2026-10-06 02:00 UTC is running"}},
+		{"first run due, within grace", cronJob("0 2 * * *", "", day(5, 12, 0), nil, 0, false), day(6, 2, 1),
+			agent.StatusHealthy, []string{"backup: the run due 2026-10-06 02:00 UTC has not succeeded yet"}},
+		{"first run running, within grace", cronJob("0 2 * * *", "", day(5, 12, 0), nil, 1, false), day(6, 2, 1),
+			agent.StatusHealthy, []string{"backup: the run due 2026-10-06 02:00 UTC is running"}},
 		{"running now", cronJob("0 2 * * *", "", created, ptr(day(5, 2, 5)), 1, false), day(6, 3, 0),
 			agent.StatusHealthy, []string{"the run due 2026-10-06 02:00 UTC is running"}},
 		{"one run missed", cronJob("0 2 * * *", "", created, ptr(day(5, 2, 5)), 0, false), day(6, 3, 0),

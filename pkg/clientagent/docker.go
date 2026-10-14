@@ -4,15 +4,17 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/gocodedotca/gryphon-agent/pkg/phrase"
 )
 
 // The Docker Engine API, over its Unix socket.
@@ -79,7 +81,7 @@ type dockerError struct {
 
 func (e *dockerError) Error() string {
 	if e.message == "" {
-		return fmt.Sprintf("Docker answered %d", e.status)
+		return phrase.T("Docker answered {status}", "status", e.status)
 	}
 	return e.message
 }
@@ -114,7 +116,7 @@ func (d *dockerClient) get(ctx context.Context, path string, query url.Values, o
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 	if err != nil {
-		return fmt.Errorf("reading Docker's answer: %w", err)
+		return phrase.Errorf("reading Docker's answer: {err}", "err", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		var msg struct {
@@ -124,7 +126,7 @@ func (d *dockerClient) get(ctx context.Context, path string, query url.Values, o
 		return &dockerError{status: resp.StatusCode, message: strings.TrimSpace(msg.Message)}
 	}
 	if err := json.Unmarshal(body, out); err != nil {
-		return fmt.Errorf("reading Docker's answer: %w", err)
+		return phrase.Errorf("reading Docker's answer: {err}", "err", err)
 	}
 	return nil
 }
@@ -135,19 +137,19 @@ func (d *dockerClient) get(ctx context.Context, path string, query url.Values, o
 func (d *dockerClient) unreachable(err error) error {
 	switch {
 	case errors.Is(err, os.ErrPermission):
-		return fmt.Errorf("cannot open %s: permission denied (%s)", d.socket, dockerPermissionHint)
+		return phrase.Errorf("cannot open {socket}: permission denied ({hint})", "socket", d.socket, "hint", dockerPermissionHint)
 	case errors.Is(err, os.ErrNotExist):
-		return fmt.Errorf("cannot open %s: not found (is Docker running on this node?)", d.socket)
+		return phrase.Errorf("cannot open {socket}: not found (is Docker running on this node?)", "socket", d.socket)
 	}
 	// A dial error wraps the cause in several layers; unwrap to the sentence.
 	var opErr *net.OpError
 	if errors.As(err, &opErr) && opErr.Err != nil {
-		return fmt.Errorf("cannot reach Docker at %s: %v", d.socket, opErr.Err)
+		return phrase.Errorf("cannot reach Docker at {socket}: {err}", "socket", d.socket, "err", opErr.Err.Error())
 	}
 	if uerr, ok := err.(*url.Error); ok {
 		err = uerr.Err
 	}
-	return fmt.Errorf("cannot reach Docker at %s: %v", d.socket, err)
+	return phrase.Errorf("cannot reach Docker at {socket}: {err}", "socket", d.socket, "err", err.Error())
 }
 
 // pipePath turns Docker's spelling of a named pipe, npipe:////./pipe/name (the
@@ -167,18 +169,31 @@ func pipePath(socket string) (path string, ok bool) {
 var dockerName = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]*$`)
 
 // nameParam reads the named value from a check's query string and holds it to
-// dockerName. The error is the message to answer with.
+// dockerName. The error is the message to answer with. what is "service",
+// "stack" or "container", each of which has sentences of its own.
 func nameParam(params, key, what string) (string, error) {
 	values, err := url.ParseQuery(params)
 	if err != nil {
-		return "", errors.New("could not read the check's settings: " + err.Error())
+		return "", settingsProblem(err)
 	}
 	name := strings.TrimSpace(values.Get(key))
 	if name == "" {
-		return "", errors.New("no " + what + " configured")
+		switch what {
+		case "service":
+			return "", phrase.Errorf("no service configured")
+		case "stack":
+			return "", phrase.Errorf("no stack configured")
+		}
+		return "", phrase.Errorf("no container configured")
 	}
 	if !dockerName.MatchString(name) {
-		return "", fmt.Errorf("%q is not a %s name Docker would accept", name, what)
+		switch what {
+		case "service":
+			return "", phrase.Errorf("{name} is not a service name Docker would accept", "name", strconv.Quote(name))
+		case "stack":
+			return "", phrase.Errorf("{name} is not a stack name Docker would accept", "name", strconv.Quote(name))
+		}
+		return "", phrase.Errorf("{name} is not a container name Docker would accept", "name", strconv.Quote(name))
 	}
 	return name, nil
 }

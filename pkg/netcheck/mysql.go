@@ -4,12 +4,13 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"io"
 	"net"
 	"strings"
 	"time"
+
+	"github.com/gocodedotca/gryphon-agent/pkg/phrase"
 )
 
 // The MariaDB/MySQL check that does not sign in.
@@ -84,7 +85,7 @@ func MySQLHandshake(ctx context.Context, dial DialFunc, t MySQLTarget) (MySQLGre
 	}
 	host := strings.TrimSpace(t.Host)
 	if host == "" {
-		return MySQLGreeting{}, errors.New("no address to connect to")
+		return MySQLGreeting{}, phrase.Errorf("no address to connect to")
 	}
 
 	started := time.Now()
@@ -99,7 +100,7 @@ func MySQLHandshake(ctx context.Context, dial DialFunc, t MySQLTarget) (MySQLGre
 
 	seq, payload, err := readMySQLPacket(raw)
 	if err != nil {
-		return MySQLGreeting{}, fmt.Errorf("no greeting: %w", err)
+		return MySQLGreeting{}, phrase.Errorf("no greeting: {err}", "err", err)
 	}
 	if len(payload) > 0 && payload[0] == mysqlErr {
 		// Refused before being greeted: too many connections, or this
@@ -120,7 +121,7 @@ func MySQLHandshake(ctx context.Context, dial DialFunc, t MySQLTarget) (MySQLGre
 		if g.capabilities&clientSSL != 0 {
 			useTLS = true
 		} else if mode != "preferred" {
-			return greeting, errors.New("the server does not support TLS, and the check requires it")
+			return greeting, phrase.Errorf("the server does not support TLS, and the check requires it")
 		}
 	}
 
@@ -132,14 +133,14 @@ func MySQLHandshake(ctx context.Context, dial DialFunc, t MySQLTarget) (MySQLGre
 		caps |= clientSSL
 		seq++
 		if err := writeMySQLPacket(conn, seq, mysqlHandshakePrefix(caps, g.charset)); err != nil {
-			return greeting, fmt.Errorf("cannot send an SSL request: %w", err)
+			return greeting, phrase.Errorf("cannot send an SSL request: {err}", "err", err)
 		}
 		tlsConn := tls.Client(raw, &tls.Config{
 			ServerName:         serverName(host),
 			InsecureSkipVerify: mode != "true", //nolint:gosec // preferred and skip-verify are the driver's own no-verify modes
 		})
 		if err := tlsConn.HandshakeContext(ctx); err != nil {
-			return greeting, fmt.Errorf("TLS handshake failed: %w", err)
+			return greeting, phrase.Errorf("TLS handshake failed: {err}", "err", err)
 		}
 		conn = tlsConn
 	}
@@ -160,7 +161,7 @@ func MySQLHandshake(ctx context.Context, dial DialFunc, t MySQLTarget) (MySQLGre
 	}
 	seq++
 	if err := writeMySQLPacket(conn, seq, resp); err != nil {
-		return greeting, fmt.Errorf("cannot answer the greeting: %w", err)
+		return greeting, phrase.Errorf("cannot answer the greeting: {err}", "err", err)
 	}
 
 	// The server's verdict. An empty password is settled in one reply for
@@ -171,11 +172,11 @@ func MySQLHandshake(ctx context.Context, dial DialFunc, t MySQLTarget) (MySQLGre
 		var reply []byte
 		seq, reply, err = readMySQLPacket(conn)
 		if err != nil {
-			return greeting, fmt.Errorf("no answer to the handshake: %w", err)
+			return greeting, phrase.Errorf("no answer to the handshake: {err}", "err", err)
 		}
 		greeting.RTT = time.Since(started)
 		if len(reply) == 0 {
-			return greeting, errors.New("an empty reply to the handshake; is this MySQL?")
+			return greeting, phrase.Errorf("an empty reply to the handshake; is this MySQL?")
 		}
 		switch reply[0] {
 		case mysqlErr:
@@ -188,13 +189,13 @@ func MySQLHandshake(ctx context.Context, dial DialFunc, t MySQLTarget) (MySQLGre
 		case mysqlAuthSwitch, mysqlAuthMoreData:
 			seq++
 			if err := writeMySQLPacket(conn, seq, nil); err != nil {
-				return greeting, fmt.Errorf("cannot answer an authentication request: %w", err)
+				return greeting, phrase.Errorf("cannot answer an authentication request: {err}", "err", err)
 			}
 		default:
-			return greeting, fmt.Errorf("unexpected reply %#x to the handshake; is this MySQL?", reply[0])
+			return greeting, phrase.Errorf("unexpected reply {reply} to the handshake; is this MySQL?", "reply", fmt.Sprintf("%#x", reply[0]))
 		}
 	}
-	return greeting, errors.New("the server kept asking for authentication data")
+	return greeting, phrase.Errorf("the server kept asking for authentication data")
 }
 
 // The MySQL client/server protocol, as much of it as the handshake touches.
@@ -231,11 +232,11 @@ func readMySQLPacket(conn net.Conn) (seq byte, payload []byte, err error) {
 	}
 	length := int(header[0]) | int(header[1])<<8 | int(header[2])<<16
 	if length > maxMessage {
-		return 0, nil, fmt.Errorf("a packet of %d bytes is not a MySQL greeting", length)
+		return 0, nil, phrase.Errorf("a packet of {n} bytes is not a MySQL greeting", "n", fmt.Sprint(length))
 	}
 	payload = make([]byte, length)
 	if _, err := io.ReadFull(conn, payload); err != nil {
-		return 0, nil, fmt.Errorf("truncated packet: %w", err)
+		return 0, nil, phrase.Errorf("truncated packet: {err}", "err", err)
 	}
 	return header[3], payload, nil
 }
@@ -269,11 +270,11 @@ type mysqlGreeting struct {
 func parseMySQLGreeting(p []byte) (mysqlGreeting, error) {
 	var g mysqlGreeting
 	if len(p) < 1 || p[0] != 10 {
-		return g, errors.New("the greeting is not MySQL protocol version 10; is this MySQL?")
+		return g, phrase.Errorf("the greeting is not MySQL protocol version 10; is this MySQL?")
 	}
 	end := strings.IndexByte(string(p[1:]), 0)
 	if end < 0 {
-		return g, errors.New("the greeting names no server version; is this MySQL?")
+		return g, phrase.Errorf("the greeting names no server version; is this MySQL?")
 	}
 	g.version = strings.TrimPrefix(string(p[1:1+end]), "5.5.5-")
 	pos := 1 + end + 1
@@ -281,7 +282,7 @@ func parseMySQLGreeting(p []byte) (mysqlGreeting, error) {
 	pos += 8 // the first part of the authentication data
 	pos++    // filler
 	if len(p) < pos+2 {
-		return g, errors.New("the greeting is truncated; is this MySQL?")
+		return g, phrase.Errorf("the greeting is truncated; is this MySQL?")
 	}
 	g.capabilities = uint32(binary.LittleEndian.Uint16(p[pos : pos+2]))
 	pos += 2
@@ -323,7 +324,7 @@ func parseMySQLGreeting(p []byte) (mysqlGreeting, error) {
 // Anything else: not a MySQL error packet at all.
 func judgeMySQLError(p []byte) error {
 	if len(p) < 3 || p[0] != mysqlErr {
-		return errors.New("a malformed error packet; is this MySQL?")
+		return phrase.Errorf("a malformed error packet; is this MySQL?")
 	}
 	code := binary.LittleEndian.Uint16(p[1:3])
 	msg := p[3:]
