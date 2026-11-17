@@ -37,10 +37,17 @@ func healthy(msg string) Outcome { return Outcome{Status: agent.StatusHealthy, M
 func problem(msg string) Outcome { return Outcome{Status: agent.StatusProblem, Message: msg} }
 func unknown(msg string) Outcome { return Outcome{Status: agent.StatusUnknown, Message: msg} }
 
-// NewHTTPClient returns an HTTP client with a real timeout and a connection
-// pool. The old code built a bare &http.Client{} per call, which has no timeout
-// at all — a host that accepts a connection and then stalls would park a check
-// goroutine forever.
+// NewHTTPClient returns an HTTP client with a real timeout. The old code built
+// a bare &http.Client{} per call, which has no timeout at all — a host that
+// accepts a connection and then stalls would park a check goroutine forever.
+//
+// It keeps no connections between requests: every check resolves the name,
+// dials and shakes hands afresh, as a visitor arriving would. A pooled
+// connection outlives a DNS change. When a site moved and its old server
+// answered 503, the failing check reran every minute — inside the idle
+// timeout — so it went on reusing the connection to the old server and never
+// looked the name up again, reporting the moved site down indefinitely while
+// it was up. Reuse also left the connect and TLS time out of the response time.
 func NewHTTPClient(timeout time.Duration) *http.Client {
 	return &http.Client{
 		Timeout: timeout,
@@ -50,9 +57,7 @@ func NewHTTPClient(timeout time.Duration) *http.Client {
 				Timeout:   5 * time.Second,
 				KeepAlive: 30 * time.Second,
 			}).DialContext,
-			MaxIdleConns:          100,
-			MaxIdleConnsPerHost:   4,
-			IdleConnTimeout:       90 * time.Second,
+			DisableKeepAlives:     true,
 			TLSHandshakeTimeout:   10 * time.Second,
 			ExpectContinueTimeout: 1 * time.Second,
 		},

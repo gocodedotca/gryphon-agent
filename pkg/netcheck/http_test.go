@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -194,5 +195,30 @@ func TestFetchSaysWhichIntermediateIsMissing(t *testing.T) {
 	}
 	if strings.Contains(got.Message, "x509:") {
 		t.Errorf("message %q still passes Go's own error through", got.Message)
+	}
+}
+
+// A check must not reuse a connection from the run before: a pooled connection
+// outlives a DNS change, and a failing check that reran inside the idle timeout
+// kept fetching from a site's old server long after the name had moved.
+func TestFetchOpensAFreshConnectionEachTime(t *testing.T) {
+	var opened atomic.Int32
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	srv.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateNew {
+			opened.Add(1)
+		}
+	}
+	srv.Start()
+	defer srv.Close()
+
+	client := NewHTTPClient(5 * time.Second)
+	for i := range 3 {
+		if out := FetchWith(context.Background(), client, srv.URL, FetchSpec{}); out.Status != agent.StatusHealthy {
+			t.Fatalf("fetch %d: %v %q", i, out.Status, out.Message)
+		}
+	}
+	if got := opened.Load(); got != 3 {
+		t.Fatalf("three checks opened %d connections, want 3", got)
 	}
 }
